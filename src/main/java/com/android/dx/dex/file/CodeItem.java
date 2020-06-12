@@ -1,8 +1,23 @@
+/*
+ * Copyright (C) 2007 The Android Open Source Project
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
 package com.android.dx.dex.file;
 
 import com.android.dex.util.ExceptionWithContext;
 import com.android.dx.dex.code.DalvCode;
-import com.android.dx.dex.code.DalvCode.AssignIndicesCallback;
 import com.android.dx.dex.code.DalvInsnList;
 import com.android.dx.rop.cst.Constant;
 import com.android.dx.rop.cst.CstMethodRef;
@@ -11,178 +26,301 @@ import com.android.dx.rop.type.Type;
 import com.android.dx.rop.type.TypeList;
 import com.android.dx.util.AnnotatedOutput;
 import com.android.dx.util.Hex;
-import java.io.PrintWriter;
-import java.io.Writer;
-import java.util.Iterator;
 
+import java.io.PrintWriter;
+
+/**
+ * Representation of all the parts needed for concrete methods in a
+ * {@code dex} file.
+ */
 public final class CodeItem extends OffsettedItem {
+    /** file alignment of this class, in bytes */
     private static final int ALIGNMENT = 4;
+
+    /** write size of the header of this class, in bytes */
     private static final int HEADER_SIZE = 16;
-    private CatchStructs catches;
-    private final DalvCode code;
-    private DebugInfoItem debugInfo;
-    private final boolean isStatic;
+
+    /** {@code non-null;} method that this code implements */
     private final CstMethodRef ref;
+
+    /** {@code non-null;} the bytecode instructions and associated data */
+    private final DalvCode code;
+
+    /** {@code null-ok;} the catches, if needed; set in {@link #addContents} */
+    private CatchStructs catches;
+
+    /** whether this instance is for a {@code static} method */
+    private final boolean isStatic;
+
+    /**
+     * {@code non-null;} list of possibly-thrown exceptions; just used in
+     * generating debugging output (listings)
+     */
     private final TypeList throwsList;
 
-    public CodeItem(CstMethodRef ref, DalvCode code, boolean isStatic, TypeList throwsList) {
-        super(4, -1);
+    /**
+     * {@code null-ok;} the debug info or {@code null} if there is none;
+     * set in {@link #addContents}
+     */
+    private DebugInfoItem debugInfo;
+
+    /**
+     * Constructs an instance.
+     *
+     * @param ref {@code non-null;} method that this code implements
+     * @param code {@code non-null;} the underlying code
+     * @param isStatic whether this instance is for a {@code static}
+     * method
+     * @param throwsList {@code non-null;} list of possibly-thrown exceptions,
+     * just used in generating debugging output (listings)
+     */
+    public CodeItem(CstMethodRef ref, DalvCode code, boolean isStatic,
+            TypeList throwsList) {
+        super(ALIGNMENT, -1);
+
         if (ref == null) {
             throw new NullPointerException("ref == null");
-        } else if (code == null) {
-            throw new NullPointerException("code == null");
-        } else if (throwsList == null) {
-            throw new NullPointerException("throwsList == null");
-        } else {
-            this.ref = ref;
-            this.code = code;
-            this.isStatic = isStatic;
-            this.throwsList = throwsList;
-            this.catches = null;
-            this.debugInfo = null;
         }
+
+        if (code == null) {
+            throw new NullPointerException("code == null");
+        }
+
+        if (throwsList == null) {
+            throw new NullPointerException("throwsList == null");
+        }
+
+        this.ref = ref;
+        this.code = code;
+        this.isStatic = isStatic;
+        this.throwsList = throwsList;
+        this.catches = null;
+        this.debugInfo = null;
     }
 
+    /** {@inheritDoc} */
+    @Override
     public ItemType itemType() {
         return ItemType.TYPE_CODE_ITEM;
     }
 
+    /** {@inheritDoc} */
     public void addContents(DexFile file) {
-        Iterator it;
         MixedItemSection byteData = file.getByteData();
         TypeIdsSection typeIds = file.getTypeIds();
-        if (this.code.hasPositions() || this.code.hasLocals()) {
-            this.debugInfo = new DebugInfoItem(this.code, this.isStatic, this.ref);
-            byteData.add(this.debugInfo);
+
+        if (code.hasPositions() || code.hasLocals()) {
+            debugInfo = new DebugInfoItem(code, isStatic, ref);
+            byteData.add(debugInfo);
         }
-        if (this.code.hasAnyCatches()) {
-            it = this.code.getCatchTypes().iterator();
-            while (it.hasNext()) {
-                typeIds.intern((Type) it.next());
+
+        if (code.hasAnyCatches()) {
+            for (Type type : code.getCatchTypes()) {
+                typeIds.intern(type);
             }
-            this.catches = new CatchStructs(this.code);
+            catches = new CatchStructs(code);
         }
-        it = this.code.getInsnConstants().iterator();
-        while (it.hasNext()) {
-            file.internIfAppropriate((Constant) it.next());
+
+        for (Constant c : code.getInsnConstants()) {
+            file.internIfAppropriate(c);
         }
     }
 
+    /** {@inheritDoc} */
+    @Override
     public String toString() {
         return "CodeItem{" + toHuman() + "}";
     }
 
+    /** {@inheritDoc} */
+    @Override
     public String toHuman() {
-        return this.ref.toHuman();
+        return ref.toHuman();
     }
 
+    /**
+     * Gets the reference to the method this instance implements.
+     *
+     * @return {@code non-null;} the method reference
+     */
     public CstMethodRef getRef() {
-        return this.ref;
+        return ref;
     }
 
+    /**
+     * Does a human-friendly dump of this instance.
+     *
+     * @param out {@code non-null;} where to dump
+     * @param prefix {@code non-null;} per-line prefix to use
+     * @param verbose whether to be verbose with the output
+     */
     public void debugPrint(PrintWriter out, String prefix, boolean verbose) {
-        out.println(this.ref.toHuman() + ":");
-        DalvInsnList insns = this.code.getInsns();
-        out.println("regs: " + Hex.u2(getRegistersSize()) + "; ins: " + Hex.u2(getInsSize()) + "; outs: " + Hex.u2(getOutsSize()));
-        insns.debugPrint((Writer) out, prefix, verbose);
+        out.println(ref.toHuman() + ":");
+
+        DalvInsnList insns = code.getInsns();
+        out.println("regs: " + Hex.u2(getRegistersSize()) +
+                "; ins: " + Hex.u2(getInsSize()) + "; outs: " +
+                Hex.u2(getOutsSize()));
+
+        insns.debugPrint(out, prefix, verbose);
+
         String prefix2 = prefix + "  ";
-        if (this.catches != null) {
+
+        if (catches != null) {
             out.print(prefix);
             out.println("catches");
-            this.catches.debugPrint(out, prefix2);
+            catches.debugPrint(out, prefix2);
         }
-        if (this.debugInfo != null) {
+
+        if (debugInfo != null) {
             out.print(prefix);
             out.println("debug info");
-            this.debugInfo.debugPrint(out, prefix2);
+            debugInfo.debugPrint(out, prefix2);
         }
     }
 
+    /** {@inheritDoc} */
+    @Override
     protected void place0(Section addedTo, int offset) {
-        int catchesSize;
         final DexFile file = addedTo.getFile();
-        this.code.assignIndices(new AssignIndicesCallback() {
-            public int getIndex(Constant cst) {
-                IndexedItem item = file.findItemOrNull(cst);
-                if (item == null) {
-                    return -1;
+        int catchesSize;
+
+        /*
+         * In order to get the catches and insns, all the code's
+         * constants need to be assigned indices.
+         */
+        code.assignIndices(new DalvCode.AssignIndicesCallback() {
+                public int getIndex(Constant cst) {
+                    IndexedItem item = file.findItemOrNull(cst);
+                    if (item == null) {
+                        return -1;
+                    }
+                    return item.getIndex();
                 }
-                return item.getIndex();
-            }
-        });
-        if (this.catches != null) {
-            this.catches.encode(file);
-            catchesSize = this.catches.writeSize();
+            });
+
+        if (catches != null) {
+            catches.encode(file);
+            catchesSize = catches.writeSize();
         } else {
             catchesSize = 0;
         }
-        int insnsSize = this.code.getInsns().codeSize();
+
+        /*
+         * The write size includes the header, two bytes per code
+         * unit, post-code padding if necessary, and however much
+         * space the catches need.
+         */
+
+        int insnsSize = code.getInsns().codeSize();
         if ((insnsSize & 1) != 0) {
             insnsSize++;
         }
-        setWriteSize(((insnsSize * 2) + 16) + catchesSize);
+
+        setWriteSize(HEADER_SIZE + (insnsSize * 2) + catchesSize);
     }
 
+    /** {@inheritDoc} */
+    @Override
     protected void writeTo0(DexFile file, AnnotatedOutput out) {
         boolean annotates = out.annotates();
         int regSz = getRegistersSize();
         int outsSz = getOutsSize();
         int insSz = getInsSize();
-        int insnsSz = this.code.getInsns().codeSize();
+        int insnsSz = code.getInsns().codeSize();
         boolean needPadding = (insnsSz & 1) != 0;
-        int triesSz = this.catches == null ? 0 : this.catches.triesSize();
-        int debugOff = this.debugInfo == null ? 0 : this.debugInfo.getAbsoluteOffset();
+        int triesSz = (catches == null) ? 0 : catches.triesSize();
+        int debugOff = (debugInfo == null) ? 0 : debugInfo.getAbsoluteOffset();
+
         if (annotates) {
-            out.annotate(0, offsetString() + ' ' + this.ref.toHuman());
+            out.annotate(0, offsetString() + ' ' + ref.toHuman());
             out.annotate(2, "  registers_size: " + Hex.u2(regSz));
             out.annotate(2, "  ins_size:       " + Hex.u2(insSz));
             out.annotate(2, "  outs_size:      " + Hex.u2(outsSz));
             out.annotate(2, "  tries_size:     " + Hex.u2(triesSz));
             out.annotate(4, "  debug_off:      " + Hex.u4(debugOff));
             out.annotate(4, "  insns_size:     " + Hex.u4(insnsSz));
-            if (this.throwsList.size() != 0) {
-                out.annotate(0, "  throws " + StdTypeList.toHuman(this.throwsList));
+
+            // This isn't represented directly here, but it is useful to see.
+            int size = throwsList.size();
+            if (size != 0) {
+                out.annotate(0, "  throws " + StdTypeList.toHuman(throwsList));
             }
         }
+
         out.writeShort(regSz);
         out.writeShort(insSz);
         out.writeShort(outsSz);
         out.writeShort(triesSz);
         out.writeInt(debugOff);
         out.writeInt(insnsSz);
+
         writeCodes(file, out);
-        if (this.catches != null) {
+
+        if (catches != null) {
             if (needPadding) {
                 if (annotates) {
                     out.annotate(2, "  padding: 0");
                 }
                 out.writeShort(0);
             }
-            this.catches.writeTo(file, out);
+
+            catches.writeTo(file, out);
         }
-        if (annotates && this.debugInfo != null) {
-            out.annotate(0, "  debug info");
-            this.debugInfo.annotateTo(file, out, "    ");
+
+        if (annotates) {
+            /*
+             * These are pointed at in the code header (above), but it's less
+             * distracting to expand on them at the bottom of the code.
+             */
+            if (debugInfo != null) {
+                out.annotate(0, "  debug info");
+                debugInfo.annotateTo(file, out, "    ");
+            }
         }
     }
 
+    /**
+     * Helper for {@link #writeTo0} which writes out the actual bytecode.
+     *
+     * @param file {@code non-null;} file we are part of
+     * @param out {@code non-null;} where to write to
+     */
     private void writeCodes(DexFile file, AnnotatedOutput out) {
+        DalvInsnList insns = code.getInsns();
+
         try {
-            this.code.getInsns().writeTo(out);
+            insns.writeTo(out);
         } catch (RuntimeException ex) {
-            throw ExceptionWithContext.withContext(ex, "...while writing instructions for " + this.ref.toHuman());
+            throw ExceptionWithContext.withContext(ex, "...while writing " +
+                    "instructions for " + ref.toHuman());
         }
     }
 
+    /**
+     * Get the in registers count.
+     *
+     * @return the count
+     */
     private int getInsSize() {
-        return this.ref.getParameterWordCount(this.isStatic);
+        return ref.getParameterWordCount(isStatic);
     }
 
+    /**
+     * Get the out registers count.
+     *
+     * @return the count
+     */
     private int getOutsSize() {
-        return this.code.getInsns().getOutsSize();
+        return code.getInsns().getOutsSize();
     }
 
+    /**
+     * Get the total registers count.
+     *
+     * @return the count
+     */
     private int getRegistersSize() {
-        return this.code.getInsns().getRegistersSize();
+        return code.getInsns().getRegistersSize();
     }
 }

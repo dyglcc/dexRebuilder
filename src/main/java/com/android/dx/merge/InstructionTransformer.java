@@ -1,124 +1,115 @@
+/*
+ * Copyright (C) 2011 The Android Open Source Project
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
 package com.android.dx.merge;
 
-import com.android.dex.DexException;
 import com.android.dex.DexIndexOverflowException;
-import com.android.dx.io.CodeReader;
-import com.android.dx.io.CodeReader.Visitor;
-import com.android.dx.io.instructions.DecodedInstruction;
+import com.android.dx.io.Opcodes;
 import com.android.dx.io.instructions.ShortArrayCodeOutput;
+import com.android.dex.DexException;
+import com.android.dx.io.CodeReader;
+import com.android.dx.io.instructions.DecodedInstruction;
 
 final class InstructionTransformer {
-    private IndexMap indexMap;
-    private int mappedAt;
+    private final CodeReader reader;
+
     private DecodedInstruction[] mappedInstructions;
-    private final CodeReader reader = new CodeReader();
-
-    private class CallSiteVisitor implements Visitor {
-        private CallSiteVisitor() {
-        }
-
-        public void visit(DecodedInstruction[] all, DecodedInstruction one) {
-            InstructionTransformer.this.mappedInstructions[InstructionTransformer.this.mappedAt = InstructionTransformer.this.mappedAt + 1] = one.withIndex(InstructionTransformer.this.indexMap.adjustCallSite(one.getIndex()));
-        }
-    }
-
-    private class FieldVisitor implements Visitor {
-        private FieldVisitor() {
-        }
-
-        public void visit(DecodedInstruction[] all, DecodedInstruction one) {
-            int mappedId = InstructionTransformer.this.indexMap.adjustField(one.getIndex());
-            InstructionTransformer.jumboCheck(one.getOpcode() == 27, mappedId);
-            InstructionTransformer.this.mappedInstructions[InstructionTransformer.this.mappedAt = InstructionTransformer.this.mappedAt + 1] = one.withIndex(mappedId);
-        }
-    }
-
-    private class GenericVisitor implements Visitor {
-        private GenericVisitor() {
-        }
-
-        public void visit(DecodedInstruction[] all, DecodedInstruction one) {
-            InstructionTransformer.this.mappedInstructions[InstructionTransformer.this.mappedAt = InstructionTransformer.this.mappedAt + 1] = one;
-        }
-    }
-
-    private class MethodAndProtoVisitor implements Visitor {
-        private MethodAndProtoVisitor() {
-        }
-
-        public void visit(DecodedInstruction[] all, DecodedInstruction one) {
-            InstructionTransformer.this.mappedInstructions[InstructionTransformer.this.mappedAt = InstructionTransformer.this.mappedAt + 1] = one.withProtoIndex(InstructionTransformer.this.indexMap.adjustMethod(one.getIndex()), InstructionTransformer.this.indexMap.adjustProto(one.getProtoIndex()));
-        }
-    }
-
-    private class MethodVisitor implements Visitor {
-        private MethodVisitor() {
-        }
-
-        public void visit(DecodedInstruction[] all, DecodedInstruction one) {
-            int mappedId = InstructionTransformer.this.indexMap.adjustMethod(one.getIndex());
-            InstructionTransformer.jumboCheck(one.getOpcode() == 27, mappedId);
-            InstructionTransformer.this.mappedInstructions[InstructionTransformer.this.mappedAt = InstructionTransformer.this.mappedAt + 1] = one.withIndex(mappedId);
-        }
-    }
-
-    private class StringVisitor implements Visitor {
-        private StringVisitor() {
-        }
-
-        public void visit(DecodedInstruction[] all, DecodedInstruction one) {
-            int mappedId = InstructionTransformer.this.indexMap.adjustString(one.getIndex());
-            InstructionTransformer.jumboCheck(one.getOpcode() == 27, mappedId);
-            InstructionTransformer.this.mappedInstructions[InstructionTransformer.this.mappedAt = InstructionTransformer.this.mappedAt + 1] = one.withIndex(mappedId);
-        }
-    }
-
-    private class TypeVisitor implements Visitor {
-        private TypeVisitor() {
-        }
-
-        public void visit(DecodedInstruction[] all, DecodedInstruction one) {
-            int mappedId = InstructionTransformer.this.indexMap.adjustType(one.getIndex());
-            InstructionTransformer.jumboCheck(one.getOpcode() == 27, mappedId);
-            InstructionTransformer.this.mappedInstructions[InstructionTransformer.this.mappedAt = InstructionTransformer.this.mappedAt + 1] = one.withIndex(mappedId);
-        }
-    }
+    private int mappedAt;
+    private IndexMap indexMap;
 
     public InstructionTransformer() {
+        this.reader = new CodeReader();
         this.reader.setAllVisitors(new GenericVisitor());
         this.reader.setStringVisitor(new StringVisitor());
         this.reader.setTypeVisitor(new TypeVisitor());
         this.reader.setFieldVisitor(new FieldVisitor());
         this.reader.setMethodVisitor(new MethodVisitor());
-        this.reader.setMethodAndProtoVisitor(new MethodAndProtoVisitor());
-        this.reader.setCallSiteVisitor(new CallSiteVisitor());
     }
 
     public short[] transform(IndexMap indexMap, short[] encodedInstructions) throws DexException {
-        int i = 0;
-        DecodedInstruction[] decodedInstructions = DecodedInstruction.decodeAll(encodedInstructions);
+        DecodedInstruction[] decodedInstructions =
+            DecodedInstruction.decodeAll(encodedInstructions);
         int size = decodedInstructions.length;
+
         this.indexMap = indexMap;
-        this.mappedInstructions = new DecodedInstruction[size];
-        this.mappedAt = 0;
-        this.reader.visitAll(decodedInstructions);
+        mappedInstructions = new DecodedInstruction[size];
+        mappedAt = 0;
+        reader.visitAll(decodedInstructions);
+
         ShortArrayCodeOutput out = new ShortArrayCodeOutput(size);
-        DecodedInstruction[] decodedInstructionArr = this.mappedInstructions;
-        int length = decodedInstructionArr.length;
-        while (i < length) {
-            DecodedInstruction instruction = decodedInstructionArr[i];
+        for (DecodedInstruction instruction : mappedInstructions) {
             if (instruction != null) {
                 instruction.encode(out);
             }
-            i++;
         }
+
         this.indexMap = null;
         return out.getArray();
     }
 
+    private class GenericVisitor implements CodeReader.Visitor {
+        public void visit(DecodedInstruction[] all, DecodedInstruction one) {
+            mappedInstructions[mappedAt++] = one;
+        }
+    }
+
+    private class StringVisitor implements CodeReader.Visitor {
+        public void visit(DecodedInstruction[] all, DecodedInstruction one) {
+            int stringId = one.getIndex();
+            int mappedId = indexMap.adjustString(stringId);
+            boolean isJumbo = (one.getOpcode() == Opcodes.CONST_STRING_JUMBO);
+            jumboCheck(isJumbo, mappedId);
+            mappedInstructions[mappedAt++] = one.withIndex(mappedId);
+        }
+    }
+
+    private class FieldVisitor implements CodeReader.Visitor {
+        public void visit(DecodedInstruction[] all, DecodedInstruction one) {
+            int fieldId = one.getIndex();
+            int mappedId = indexMap.adjustField(fieldId);
+            boolean isJumbo = (one.getOpcode() == Opcodes.CONST_STRING_JUMBO);
+            jumboCheck(isJumbo, mappedId);
+            mappedInstructions[mappedAt++] = one.withIndex(mappedId);
+        }
+    }
+
+    private class TypeVisitor implements CodeReader.Visitor {
+        public void visit(DecodedInstruction[] all, DecodedInstruction one) {
+            int typeId = one.getIndex();
+            int mappedId = indexMap.adjustType(typeId);
+            boolean isJumbo = (one.getOpcode() == Opcodes.CONST_STRING_JUMBO);
+            jumboCheck(isJumbo, mappedId);
+            mappedInstructions[mappedAt++] = one.withIndex(mappedId);
+        }
+    }
+
+    private class MethodVisitor implements CodeReader.Visitor {
+        public void visit(DecodedInstruction[] all, DecodedInstruction one) {
+            int methodId = one.getIndex();
+            int mappedId = indexMap.adjustMethod(methodId);
+            boolean isJumbo = (one.getOpcode() == Opcodes.CONST_STRING_JUMBO);
+            jumboCheck(isJumbo, mappedId);
+            mappedInstructions[mappedAt++] = one.withIndex(mappedId);
+        }
+    }
+
     private static void jumboCheck(boolean isJumbo, int newIndex) {
-        if (!isJumbo && newIndex > 65535) {
-            throw new DexIndexOverflowException("Cannot merge new index " + newIndex + " into a non-jumbo instruction!");
+        if (!isJumbo && (newIndex > 0xffff)) {
+            throw new DexIndexOverflowException("Cannot merge new index " + newIndex +
+                                   " into a non-jumbo instruction!");
         }
     }
 }

@@ -1,154 +1,161 @@
+/*
+ * Copyright (C) 2011 The Android Open Source Project
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
 package com.android.dex;
 
 import java.io.IOException;
 import java.io.UnsupportedEncodingException;
 import java.util.Arrays;
 
+/**
+ * The file header and map.
+ */
 public final class TableOfContents {
-    public final Section annotationSetRefLists = new Section(4098);
-    public final Section annotationSets = new Section(4099);
-    public final Section annotations = new Section(8196);
-    public final Section annotationsDirectories = new Section(8198);
-    public int apiLevel;
-    public final Section callSiteIds = new Section(7);
+
+    /*
+     * TODO: factor out ID constants.
+     */
+
+    public final Section header = new Section(0x0000);
+    public final Section stringIds = new Section(0x0001);
+    public final Section typeIds = new Section(0x0002);
+    public final Section protoIds = new Section(0x0003);
+    public final Section fieldIds = new Section(0x0004);
+    public final Section methodIds = new Section(0x0005);
+    public final Section classDefs = new Section(0x0006);
+    public final Section mapList = new Section(0x1000);
+    public final Section typeLists = new Section(0x1001);
+    public final Section annotationSetRefLists = new Section(0x1002);
+    public final Section annotationSets = new Section(0x1003);
+    public final Section classDatas = new Section(0x2000);
+    public final Section codes = new Section(0x2001);
+    public final Section stringDatas = new Section(0x2002);
+    public final Section debugInfos = new Section(0x2003);
+    public final Section annotations = new Section(0x2004);
+    public final Section encodedArrays = new Section(0x2005);
+    public final Section annotationsDirectories = new Section(0x2006);
+    public final Section[] sections = {
+            header, stringIds, typeIds, protoIds, fieldIds, methodIds, classDefs, mapList,
+            typeLists, annotationSetRefLists, annotationSets, classDatas, codes, stringDatas,
+            debugInfos, annotations, encodedArrays, annotationsDirectories
+    };
+
     public int checksum;
-    public final Section classDatas = new Section(8192);
-    public final Section classDefs = new Section(6);
-    public final Section codes = new Section(8193);
-    public int dataOff;
-    public int dataSize;
-    public final Section debugInfos = new Section(8195);
-    public final Section encodedArrays = new Section(8197);
-    public final Section fieldIds = new Section(4);
+    public byte[] signature;
     public int fileSize;
-    public final Section header = new Section(0);
-    public int linkOff;
     public int linkSize;
-    public final Section mapList = new Section(4096);
-    public final Section methodHandles = new Section(8);
-    public final Section methodIds = new Section(5);
-    public final Section protoIds = new Section(3);
-    public final Section[] sections = new Section[]{this.header, this.stringIds, this.typeIds, this.protoIds, this.fieldIds, this.methodIds, this.classDefs, this.mapList, this.callSiteIds, this.methodHandles, this.typeLists, this.annotationSetRefLists, this.annotationSets, this.classDatas, this.codes, this.stringDatas, this.debugInfos, this.annotations, this.encodedArrays, this.annotationsDirectories};
-    public byte[] signature = new byte[20];
-    public final Section stringDatas = new Section(8194);
-    public final Section stringIds = new Section(1);
-    public final Section typeIds = new Section(2);
-    public final Section typeLists = new Section(4097);
+    public int linkOff;
+    public int dataSize;
+    public int dataOff;
 
-    public static class Section implements Comparable<Section> {
-        public int byteCount = 0;
-        public int off = -1;
-        public int size = 0;
-        public final short type;
-
-        public Section(int type) {
-            this.type = (short) type;
-        }
-
-        public boolean exists() {
-            return this.size > 0;
-        }
-
-        public int compareTo(Section section) {
-            if (this.off != section.off) {
-                return this.off < section.off ? -1 : 1;
-            } else {
-                return 0;
-            }
-        }
-
-        public String toString() {
-            return String.format("Section[type=%#x,off=%#x,size=%#x]", new Object[]{Short.valueOf(this.type), Integer.valueOf(this.off), Integer.valueOf(this.size)});
-        }
+    public TableOfContents() {
+        signature = new byte[20];
     }
 
     public void readFrom(Dex dex) throws IOException {
         readHeader(dex.open(0));
-        readMap(dex.open(this.mapList.off));
+        readMap(dex.open(mapList.off));
         computeSizesFromOffsets();
     }
 
     private void readHeader(Dex.Section headerIn) throws UnsupportedEncodingException {
         byte[] magic = headerIn.readByteArray(8);
-        if (DexFormat.isSupportedDexMagic(magic)) {
-            this.apiLevel = DexFormat.magicToApi(magic);
-            this.checksum = headerIn.readInt();
-            this.signature = headerIn.readByteArray(20);
-            this.fileSize = headerIn.readInt();
-            int headerSize = headerIn.readInt();
-            if (headerSize != 112) {
-                throw new DexException("Unexpected header: 0x" + Integer.toHexString(headerSize));
-            }
-            int endianTag = headerIn.readInt();
-            if (endianTag != DexFormat.ENDIAN_TAG) {
-                throw new DexException("Unexpected endian tag: 0x" + Integer.toHexString(endianTag));
-            }
-            this.linkSize = headerIn.readInt();
-            this.linkOff = headerIn.readInt();
-            this.mapList.off = headerIn.readInt();
-            if (this.mapList.off == 0) {
-                throw new DexException("Cannot merge dex files that do not contain a map");
-            }
-            this.stringIds.size = headerIn.readInt();
-            this.stringIds.off = headerIn.readInt();
-            this.typeIds.size = headerIn.readInt();
-            this.typeIds.off = headerIn.readInt();
-            this.protoIds.size = headerIn.readInt();
-            this.protoIds.off = headerIn.readInt();
-            this.fieldIds.size = headerIn.readInt();
-            this.fieldIds.off = headerIn.readInt();
-            this.methodIds.size = headerIn.readInt();
-            this.methodIds.off = headerIn.readInt();
-            this.classDefs.size = headerIn.readInt();
-            this.classDefs.off = headerIn.readInt();
-            this.dataSize = headerIn.readInt();
-            this.dataOff = headerIn.readInt();
-            return;
+        int apiTarget = DexFormat.magicToApi(magic);
+
+        if (apiTarget != DexFormat.API_NO_EXTENDED_OPCODES) {
+            throw new DexException("Unexpected magic: " + Arrays.toString(magic));
         }
-        throw new DexException(String.format("Unexpected magic: [0x%02x, 0x%02x, 0x%02x, 0x%02x, 0x%02x, 0x%02x, 0x%02x, 0x%02x]", new Object[]{Byte.valueOf(magic[0]), Byte.valueOf(magic[1]), Byte.valueOf(magic[2]), Byte.valueOf(magic[3]), Byte.valueOf(magic[4]), Byte.valueOf(magic[5]), Byte.valueOf(magic[6]), Byte.valueOf(magic[7])}));
+
+        checksum = headerIn.readInt();
+        signature = headerIn.readByteArray(20);
+        fileSize = headerIn.readInt();
+        int headerSize = headerIn.readInt();
+        if (headerSize != SizeOf.HEADER_ITEM) {
+            throw new DexException("Unexpected header: 0x" + Integer.toHexString(headerSize));
+        }
+        int endianTag = headerIn.readInt();
+        if (endianTag != DexFormat.ENDIAN_TAG) {
+            throw new DexException("Unexpected endian tag: 0x" + Integer.toHexString(endianTag));
+        }
+        linkSize = headerIn.readInt();
+        linkOff = headerIn.readInt();
+        mapList.off = headerIn.readInt();
+        if (mapList.off == 0) {
+            throw new DexException("Cannot merge dex files that do not contain a map");
+        }
+        stringIds.size = headerIn.readInt();
+        stringIds.off = headerIn.readInt();
+        typeIds.size = headerIn.readInt();
+        typeIds.off = headerIn.readInt();
+        protoIds.size = headerIn.readInt();
+        protoIds.off = headerIn.readInt();
+        fieldIds.size = headerIn.readInt();
+        fieldIds.off = headerIn.readInt();
+        methodIds.size = headerIn.readInt();
+        methodIds.off = headerIn.readInt();
+        classDefs.size = headerIn.readInt();
+        classDefs.off = headerIn.readInt();
+        dataSize = headerIn.readInt();
+        dataOff = headerIn.readInt();
     }
 
     private void readMap(Dex.Section in) throws IOException {
         int mapSize = in.readInt();
         Section previous = null;
-        int i = 0;
-        while (i < mapSize) {
+        for (int i = 0; i < mapSize; i++) {
             short type = in.readShort();
-            in.readShort();
+            in.readShort(); // unused
             Section section = getSection(type);
             int size = in.readInt();
             int offset = in.readInt();
-            if ((section.size == 0 || section.size == size) && (section.off == -1 || section.off == offset)) {
-                section.size = size;
-                section.off = offset;
-                if (previous == null || previous.off <= section.off) {
-                    previous = section;
-                    i++;
-                } else {
-                    throw new DexException("Map is unsorted at " + previous + ", " + section);
-                }
+
+            if ((section.size != 0 && section.size != size)
+                    || (section.off != -1 && section.off != offset)) {
+                throw new DexException("Unexpected map value for 0x" + Integer.toHexString(type));
             }
-            throw new DexException("Unexpected map value for 0x" + Integer.toHexString(type));
+
+            section.size = size;
+            section.off = offset;
+
+            if (previous != null && previous.off > section.off) {
+                throw new DexException("Map is unsorted at " + previous + ", " + section);
+            }
+
+            previous = section;
         }
-        Arrays.sort(this.sections);
+        Arrays.sort(sections);
     }
 
     public void computeSizesFromOffsets() {
-        int end = this.dataOff + this.dataSize;
-        for (int i = this.sections.length - 1; i >= 0; i--) {
-            Section section = this.sections[i];
-            if (section.off != -1) {
-                if (section.off > end) {
-                    throw new DexException("Map is unsorted at " + section);
-                }
-                section.byteCount = end - section.off;
-                end = section.off;
+        int end = dataOff + dataSize;
+        for (int i = sections.length - 1; i >= 0; i--) {
+            Section section = sections[i];
+            if (section.off == -1) {
+                continue;
             }
+            if (section.off > end) {
+                throw new DexException("Map is unsorted at " + section);
+            }
+            section.byteCount = end - section.off;
+            end = section.off;
         }
     }
 
     private Section getSection(short type) {
-        for (Section section : this.sections) {
+        for (Section section : sections) {
             if (section.type == type) {
                 return section;
             }
@@ -156,47 +163,74 @@ public final class TableOfContents {
         throw new IllegalArgumentException("No such map item: " + type);
     }
 
-    public void writeHeader(Dex.Section out, int api) throws IOException {
-        out.write(DexFormat.apiToMagic(api).getBytes("UTF-8"));
-        out.writeInt(this.checksum);
-        out.write(this.signature);
-        out.writeInt(this.fileSize);
-        out.writeInt(112);
+    public void writeHeader(Dex.Section out) throws IOException {
+        out.write(DexFormat.apiToMagic(DexFormat.API_NO_EXTENDED_OPCODES).getBytes("UTF-8"));
+        out.writeInt(checksum);
+        out.write(signature);
+        out.writeInt(fileSize);
+        out.writeInt(SizeOf.HEADER_ITEM);
         out.writeInt(DexFormat.ENDIAN_TAG);
-        out.writeInt(this.linkSize);
-        out.writeInt(this.linkOff);
-        out.writeInt(this.mapList.off);
-        out.writeInt(this.stringIds.size);
-        out.writeInt(this.stringIds.off);
-        out.writeInt(this.typeIds.size);
-        out.writeInt(this.typeIds.off);
-        out.writeInt(this.protoIds.size);
-        out.writeInt(this.protoIds.off);
-        out.writeInt(this.fieldIds.size);
-        out.writeInt(this.fieldIds.off);
-        out.writeInt(this.methodIds.size);
-        out.writeInt(this.methodIds.off);
-        out.writeInt(this.classDefs.size);
-        out.writeInt(this.classDefs.off);
-        out.writeInt(this.dataSize);
-        out.writeInt(this.dataOff);
+        out.writeInt(linkSize);
+        out.writeInt(linkOff);
+        out.writeInt(mapList.off);
+        out.writeInt(stringIds.size);
+        out.writeInt(stringIds.off);
+        out.writeInt(typeIds.size);
+        out.writeInt(typeIds.off);
+        out.writeInt(protoIds.size);
+        out.writeInt(protoIds.off);
+        out.writeInt(fieldIds.size);
+        out.writeInt(fieldIds.off);
+        out.writeInt(methodIds.size);
+        out.writeInt(methodIds.off);
+        out.writeInt(classDefs.size);
+        out.writeInt(classDefs.off);
+        out.writeInt(dataSize);
+        out.writeInt(dataOff);
     }
 
     public void writeMap(Dex.Section out) throws IOException {
         int count = 0;
-        for (Section section : this.sections) {
+        for (Section section : sections) {
             if (section.exists()) {
                 count++;
             }
         }
+
         out.writeInt(count);
-        for (Section section2 : this.sections) {
-            if (section2.exists()) {
-                out.writeShort(section2.type);
+        for (Section section : sections) {
+            if (section.exists()) {
+                out.writeShort(section.type);
                 out.writeShort((short) 0);
-                out.writeInt(section2.size);
-                out.writeInt(section2.off);
+                out.writeInt(section.size);
+                out.writeInt(section.off);
             }
+        }
+    }
+
+    public static class Section implements Comparable<Section> {
+        public final short type;
+        public int size = 0;
+        public int off = -1;
+        public int byteCount = 0;
+
+        public Section(int type) {
+            this.type = (short) type;
+        }
+
+        public boolean exists() {
+            return size > 0;
+        }
+
+        public int compareTo(Section section) {
+            if (off != section.off) {
+                return off < section.off ? -1 : 1;
+            }
+            return 0;
+        }
+
+        @Override public String toString() {
+            return String.format("Section[type=%#x,off=%#x,size=%#x]", type, off, size);
         }
     }
 }

@@ -1,50 +1,87 @@
+/*
+ * Copyright (C) 2008 The Android Open Source Project
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
 package com.android.dx.util;
 
 import java.util.NoSuchElementException;
 
+/**
+ * A set of integers, represented by a bit set
+ */
 public class BitIntSet implements IntSet {
+
+    /** also accessed in ListIntSet */
     int[] bits;
 
+    /**
+     * Constructs an instance.
+     *
+     * @param max the maximum value of ints in this set.
+     */
     public BitIntSet(int max) {
-        this.bits = Bits.makeBitSet(max);
+        bits = Bits.makeBitSet(max);
     }
 
+    /** @inheritDoc */
     public void add(int value) {
         ensureCapacity(value);
-        Bits.set(this.bits, value, true);
+        Bits.set(bits, value, true);
     }
 
+    /**
+     * Ensures that the bit set has the capacity to represent the given value.
+     *
+     * @param value {@code >= 0;} value to represent
+     */
     private void ensureCapacity(int value) {
-        if (value >= Bits.getMax(this.bits)) {
-            int[] newBits = Bits.makeBitSet(Math.max(value + 1, Bits.getMax(this.bits) * 2));
-            System.arraycopy(this.bits, 0, newBits, 0, this.bits.length);
-            this.bits = newBits;
+        if (value >= Bits.getMax(bits)) {
+            int[] newBits = Bits.makeBitSet(
+                    Math.max(value + 1, 2 * Bits.getMax(bits)));
+            System.arraycopy(bits, 0, newBits, 0, bits.length);
+            bits = newBits;
         }
     }
 
+    /** @inheritDoc */
     public void remove(int value) {
-        if (value < Bits.getMax(this.bits)) {
-            Bits.set(this.bits, value, false);
+        if (value < Bits.getMax(bits)) {
+            Bits.set(bits, value, false);
         }
     }
 
+    /** @inheritDoc */
     public boolean has(int value) {
-        return value < Bits.getMax(this.bits) && Bits.get(this.bits, value);
+        return (value < Bits.getMax(bits)) && Bits.get(bits, value);
     }
 
+    /** @inheritDoc */
     public void merge(IntSet other) {
         if (other instanceof BitIntSet) {
             BitIntSet o = (BitIntSet) other;
             ensureCapacity(Bits.getMax(o.bits) + 1);
-            Bits.or(this.bits, o.bits);
+            Bits.or(bits, o.bits);
         } else if (other instanceof ListIntSet) {
-            ListIntSet o2 = (ListIntSet) other;
-            int sz = o2.ints.size();
+            ListIntSet o = (ListIntSet) other;
+            int sz = o.ints.size();
+
             if (sz > 0) {
-                ensureCapacity(o2.ints.get(sz - 1));
+                ensureCapacity(o.ints.get(sz - 1));
             }
-            for (int i = 0; i < o2.ints.size(); i++) {
-                Bits.set(this.bits, o2.ints.get(i), true);
+            for (int i = 0; i < o.ints.size(); i++) {
+                Bits.set(bits, o.ints.get(i), true);
             }
         } else {
             IntIterator iter = other.iterator();
@@ -54,43 +91,55 @@ public class BitIntSet implements IntSet {
         }
     }
 
+    /** @inheritDoc */
     public int elements() {
-        return Bits.bitCount(this.bits);
+        return Bits.bitCount(bits);
     }
 
+    /** @inheritDoc */
     public IntIterator iterator() {
         return new IntIterator() {
-            private int idx = Bits.findFirst(BitIntSet.this.bits, 0);
+            private int idx = Bits.findFirst(bits, 0);
 
+            /** @inheritDoc */
             public boolean hasNext() {
-                return this.idx >= 0;
+                return idx >= 0;
             }
 
+            /** @inheritDoc */
             public int next() {
-                if (hasNext()) {
-                    int ret = this.idx;
-                    this.idx = Bits.findFirst(BitIntSet.this.bits, this.idx + 1);
-                    return ret;
+                if (!hasNext()) {
+                    throw new NoSuchElementException();
                 }
-                throw new NoSuchElementException();
+
+                int ret = idx;
+
+                idx = Bits.findFirst(bits, idx+1);
+
+                return ret;
             }
         };
     }
 
+    /** @inheritDoc */
     public String toString() {
         StringBuilder sb = new StringBuilder();
+
         sb.append('{');
+
         boolean first = true;
-        int i = Bits.findFirst(this.bits, 0);
-        while (i >= 0) {
+        for (int i = Bits.findFirst(bits, 0)
+                ; i >= 0
+                ; i = Bits.findFirst(bits, i + 1)) {
             if (!first) {
                 sb.append(", ");
             }
             first = false;
             sb.append(i);
-            i = Bits.findFirst(this.bits, i + 1);
         }
+
         sb.append('}');
+
         return sb.toString();
     }
 }

@@ -1,284 +1,364 @@
+/*
+ * Copyright (C) 2007 The Android Open Source Project
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
 package com.android.dx.cf.cst;
 
 import com.android.dx.cf.iface.ParseException;
 import com.android.dx.cf.iface.ParseObserver;
 import com.android.dx.rop.cst.Constant;
 import com.android.dx.rop.cst.CstDouble;
-import com.android.dx.rop.cst.CstFieldRef;
 import com.android.dx.rop.cst.CstFloat;
 import com.android.dx.rop.cst.CstInteger;
 import com.android.dx.rop.cst.CstInterfaceMethodRef;
-import com.android.dx.rop.cst.CstInvokeDynamic;
 import com.android.dx.rop.cst.CstLong;
-import com.android.dx.rop.cst.CstMethodHandle;
-import com.android.dx.rop.cst.CstMethodRef;
 import com.android.dx.rop.cst.CstNat;
-import com.android.dx.rop.cst.CstProtoRef;
 import com.android.dx.rop.cst.CstString;
 import com.android.dx.rop.cst.CstType;
+import com.android.dx.rop.cst.CstFieldRef;
+import com.android.dx.rop.cst.CstMethodRef;
 import com.android.dx.rop.cst.StdConstantPool;
 import com.android.dx.rop.type.Type;
 import com.android.dx.util.ByteArray;
 import com.android.dx.util.Hex;
+
 import java.util.BitSet;
 
+/**
+ * Parser for a constant pool embedded in a class file.
+ */
 public final class ConstantPoolParser {
+    /** {@code non-null;} the bytes of the constant pool */
     private final ByteArray bytes;
-    private int endOffset = -1;
-    private ParseObserver observer;
-    private final int[] offsets;
+
+    /** {@code non-null;} actual parsed constant pool contents */
     private final StdConstantPool pool;
 
+    /** {@code non-null;} byte offsets to each cst */
+    private final int[] offsets;
+
+    /**
+     * -1 || &gt;= 10; the end offset of this constant pool in the
+     * {@code byte[]} which it came from or {@code -1} if not
+     * yet parsed
+     */
+    private int endOffset;
+
+    /** {@code null-ok;} parse observer, if any */
+    private ParseObserver observer;
+
+    /**
+     * Constructs an instance.
+     *
+     * @param bytes {@code non-null;} the bytes of the file
+     */
     public ConstantPoolParser(ByteArray bytes) {
-        int size = bytes.getUnsignedShort(8);
+        int size = bytes.getUnsignedShort(8); // constant_pool_count
+
         this.bytes = bytes;
         this.pool = new StdConstantPool(size);
         this.offsets = new int[size];
+        this.endOffset = -1;
     }
 
+    /**
+     * Sets the parse observer for this instance.
+     *
+     * @param observer {@code null-ok;} the observer
+     */
     public void setObserver(ParseObserver observer) {
         this.observer = observer;
     }
 
+    /**
+     * Gets the end offset of this constant pool in the {@code byte[]}
+     * which it came from.
+     *
+     * @return {@code >= 10;} the end offset
+     */
     public int getEndOffset() {
         parseIfNecessary();
-        return this.endOffset;
+        return endOffset;
     }
 
+    /**
+     * Gets the actual constant pool.
+     *
+     * @return {@code non-null;} the constant pool
+     */
     public StdConstantPool getPool() {
         parseIfNecessary();
-        return this.pool;
+        return pool;
     }
 
+    /**
+     * Runs {@link #parse} if it has not yet been run successfully.
+     */
     private void parseIfNecessary() {
-        if (this.endOffset < 0) {
+        if (endOffset < 0) {
             parse();
         }
     }
 
+    /**
+     * Does the actual parsing.
+     */
     private void parse() {
         determineOffsets();
-        if (this.observer != null) {
-            this.observer.parsed(this.bytes, 8, 2, "constant_pool_count: " + Hex.u2(this.offsets.length));
-            this.observer.parsed(this.bytes, 10, 0, "\nconstant_pool:");
-            this.observer.changeIndent(1);
+
+        if (observer != null) {
+            observer.parsed(bytes, 8, 2,
+                            "constant_pool_count: " + Hex.u2(offsets.length));
+            observer.parsed(bytes, 10, 0, "\nconstant_pool:");
+            observer.changeIndent(1);
         }
-        BitSet wasUtf8 = new BitSet(this.offsets.length);
-        int i = 1;
-        while (i < this.offsets.length) {
-            if (this.offsets[i] != 0 && this.pool.getOrNull(i) == null) {
+
+        /*
+         * Track the constant value's original string type. True if constants[i] was
+         * a CONSTANT_Utf8, false for any other type including CONSTANT_string.
+         */
+        BitSet wasUtf8 = new BitSet(offsets.length);
+
+        for (int i = 1; i < offsets.length; i++) {
+            int offset = offsets[i];
+            if ((offset != 0) && (pool.getOrNull(i) == null)) {
                 parse0(i, wasUtf8);
             }
-            i++;
         }
-        if (this.observer != null) {
-            for (i = 1; i < this.offsets.length; i++) {
-                Constant cst = this.pool.getOrNull(i);
-                if (cst != null) {
-                    String human;
-                    int offset = this.offsets[i];
-                    int nextOffset = this.endOffset;
-                    for (int j = i + 1; j < this.offsets.length; j++) {
-                        int off = this.offsets[j];
-                        if (off != 0) {
-                            nextOffset = off;
-                            break;
-                        }
-                    }
-                    if (wasUtf8.get(i)) {
-                        human = Hex.u2(i) + ": utf8{\"" + cst.toHuman() + "\"}";
-                    } else {
-                        human = Hex.u2(i) + ": " + cst.toString();
-                    }
-                    this.observer.parsed(this.bytes, offset, nextOffset - offset, human);
+
+        if (observer != null) {
+            for (int i = 1; i < offsets.length; i++) {
+                Constant cst = pool.getOrNull(i);
+                if (cst == null) {
+                    continue;
                 }
-            }
-            this.observer.changeIndent(-1);
-            this.observer.parsed(this.bytes, this.endOffset, 0, "end constant_pool");
-        }
-    }
-
-    private void determineOffsets() {
-        int at = 10;
-        int i = 1;
-        while (i < this.offsets.length) {
-            int lastCategory;
-            this.offsets[i] = at;
-            int tag = this.bytes.getUnsignedByte(at);
-            switch (tag) {
-                case 1:
-                    lastCategory = 1;
-                    at += this.bytes.getUnsignedShort(at + 1) + 3;
-                    break;
-                case 3:
-                case 4:
-                case 9:
-                case 10:
-                case 11:
-                case 12:
-                    lastCategory = 1;
-                    at += 5;
-                    break;
-                case 5:
-                case 6:
-                    lastCategory = 2;
-                    at += 9;
-                    break;
-                case 7:
-                case 8:
-                    lastCategory = 1;
-                    at += 3;
-                    break;
-                case 15:
-                    lastCategory = 1;
-                    at += 4;
-                    break;
-                case 16:
-                    lastCategory = 1;
-                    at += 3;
-                    break;
-                case 18:
-                    lastCategory = 1;
-                    at += 5;
-                    break;
-                default:
-                    try {
-                        throw new ParseException("unknown tag byte: " + Hex.u1(tag));
-                    } catch (ParseException ex) {
-                        ex.addContext("...while preparsing cst " + Hex.u2(i) + " at offset " + Hex.u4(at));
-                        throw ex;
+                int offset = offsets[i];
+                int nextOffset = endOffset;
+                for (int j = i + 1; j < offsets.length; j++) {
+                    int off = offsets[j];
+                    if (off != 0) {
+                        nextOffset = off;
+                        break;
                     }
+                }
+                String human = wasUtf8.get(i)
+                        ? Hex.u2(i) + ": utf8{\"" + cst.toHuman() + "\"}"
+                        : Hex.u2(i) + ": " + cst.toString();
+                observer.parsed(bytes, offset, nextOffset - offset, human);
             }
-            i += lastCategory;
+
+            observer.changeIndent(-1);
+            observer.parsed(bytes, endOffset, 0, "end constant_pool");
         }
-        this.endOffset = at;
     }
 
+    /**
+     * Populates {@link #offsets} and also completely parse utf8 constants.
+     */
+    private void determineOffsets() {
+        int at = 10; // offset from the start of the file to the first cst
+        int lastCategory;
+
+        for (int i = 1; i < offsets.length; i += lastCategory) {
+            offsets[i] = at;
+            int tag = bytes.getUnsignedByte(at);
+            try {
+                switch (tag) {
+                    case ConstantTags.CONSTANT_Integer:
+                    case ConstantTags.CONSTANT_Float:
+                    case ConstantTags.CONSTANT_Fieldref:
+                    case ConstantTags.CONSTANT_Methodref:
+                    case ConstantTags.CONSTANT_InterfaceMethodref:
+                    case ConstantTags.CONSTANT_NameAndType: {
+                        lastCategory = 1;
+                        at += 5;
+                        break;
+                    }
+                    case ConstantTags.CONSTANT_Long:
+                    case ConstantTags.CONSTANT_Double: {
+                        lastCategory = 2;
+                        at += 9;
+                        break;
+                    }
+                    case ConstantTags.CONSTANT_Class:
+                    case ConstantTags.CONSTANT_String: {
+                        lastCategory = 1;
+                        at += 3;
+                        break;
+                    }
+                    case ConstantTags.CONSTANT_Utf8: {
+                        lastCategory = 1;
+                        at += bytes.getUnsignedShort(at + 1) + 3;
+                        break;
+                    }
+                    case ConstantTags.CONSTANT_MethodHandle: {
+                        throw new ParseException("MethodHandle not supported");
+                    }
+                    case ConstantTags.CONSTANT_MethodType: {
+                        throw new ParseException("MethodType not supported");
+                    }
+                    case ConstantTags.CONSTANT_InvokeDynamic: {
+                        throw new ParseException("InvokeDynamic not supported");
+                    }
+                    default: {
+                        throw new ParseException("unknown tag byte: " + Hex.u1(tag));
+                    }
+                }
+            } catch (ParseException ex) {
+                ex.addContext("...while preparsing cst " + Hex.u2(i) + " at offset " + Hex.u4(at));
+                throw ex;
+            }
+        }
+
+        endOffset = at;
+    }
+
+    /**
+     * Parses the constant for the given index if it hasn't already been
+     * parsed, also storing it in the constant pool. This will also
+     * have the side effect of parsing any entries the indicated one
+     * depends on.
+     *
+     * @param idx which constant
+     * @return {@code non-null;} the parsed constant
+     */
     private Constant parse0(int idx, BitSet wasUtf8) {
-        Constant cst = this.pool.getOrNull(idx);
+        Constant cst = pool.getOrNull(idx);
         if (cst != null) {
             return cst;
         }
-        int at = this.offsets[idx];
+
+        int at = offsets[idx];
+
         try {
-            int tag = this.bytes.getUnsignedByte(at);
+            int tag = bytes.getUnsignedByte(at);
             switch (tag) {
-                case 1:
+                case ConstantTags.CONSTANT_Utf8: {
                     cst = parseUtf8(at);
                     wasUtf8.set(idx);
                     break;
-                case 3:
-                    cst = CstInteger.make(this.bytes.getInt(at + 1));
+                }
+                case ConstantTags.CONSTANT_Integer: {
+                    int value = bytes.getInt(at + 1);
+                    cst = CstInteger.make(value);
                     break;
-                case 4:
-                    cst = CstFloat.make(this.bytes.getInt(at + 1));
+                }
+                case ConstantTags.CONSTANT_Float: {
+                    int bits = bytes.getInt(at + 1);
+                    cst = CstFloat.make(bits);
                     break;
-                case 5:
-                    cst = CstLong.make(this.bytes.getLong(at + 1));
+                }
+                case ConstantTags.CONSTANT_Long: {
+                    long value = bytes.getLong(at + 1);
+                    cst = CstLong.make(value);
                     break;
-                case 6:
-                    cst = CstDouble.make(this.bytes.getLong(at + 1));
+                }
+                case ConstantTags.CONSTANT_Double: {
+                    long bits = bytes.getLong(at + 1);
+                    cst = CstDouble.make(bits);
                     break;
-                case 7:
-                    cst = new CstType(Type.internClassName(((CstString) parse0(this.bytes.getUnsignedShort(at + 1), wasUtf8)).getString()));
+                }
+                case ConstantTags.CONSTANT_Class: {
+                    int nameIndex = bytes.getUnsignedShort(at + 1);
+                    CstString name = (CstString) parse0(nameIndex, wasUtf8);
+                    cst = new CstType(Type.internClassName(name.getString()));
                     break;
-                case 8:
-                    cst = parse0(this.bytes.getUnsignedShort(at + 1), wasUtf8);
+                }
+                case ConstantTags.CONSTANT_String: {
+                    int stringIndex = bytes.getUnsignedShort(at + 1);
+                    cst = parse0(stringIndex, wasUtf8);
                     break;
-                case 9:
-                    cst = new CstFieldRef((CstType) parse0(this.bytes.getUnsignedShort(at + 1), wasUtf8), (CstNat) parse0(this.bytes.getUnsignedShort(at + 3), wasUtf8));
+                }
+                case ConstantTags.CONSTANT_Fieldref: {
+                    int classIndex = bytes.getUnsignedShort(at + 1);
+                    CstType type = (CstType) parse0(classIndex, wasUtf8);
+                    int natIndex = bytes.getUnsignedShort(at + 3);
+                    CstNat nat = (CstNat) parse0(natIndex, wasUtf8);
+                    cst = new CstFieldRef(type, nat);
                     break;
-                case 10:
-                    cst = new CstMethodRef((CstType) parse0(this.bytes.getUnsignedShort(at + 1), wasUtf8), (CstNat) parse0(this.bytes.getUnsignedShort(at + 3), wasUtf8));
+                }
+                case ConstantTags.CONSTANT_Methodref: {
+                    int classIndex = bytes.getUnsignedShort(at + 1);
+                    CstType type = (CstType) parse0(classIndex, wasUtf8);
+                    int natIndex = bytes.getUnsignedShort(at + 3);
+                    CstNat nat = (CstNat) parse0(natIndex, wasUtf8);
+                    cst = new CstMethodRef(type, nat);
                     break;
-                case 11:
-                    cst = new CstInterfaceMethodRef((CstType) parse0(this.bytes.getUnsignedShort(at + 1), wasUtf8), (CstNat) parse0(this.bytes.getUnsignedShort(at + 3), wasUtf8));
+                }
+                case ConstantTags.CONSTANT_InterfaceMethodref: {
+                    int classIndex = bytes.getUnsignedShort(at + 1);
+                    CstType type = (CstType) parse0(classIndex, wasUtf8);
+                    int natIndex = bytes.getUnsignedShort(at + 3);
+                    CstNat nat = (CstNat) parse0(natIndex, wasUtf8);
+                    cst = new CstInterfaceMethodRef(type, nat);
                     break;
-                case 12:
-                    cst = new CstNat((CstString) parse0(this.bytes.getUnsignedShort(at + 1), wasUtf8), (CstString) parse0(this.bytes.getUnsignedShort(at + 3), wasUtf8));
+                }
+                case ConstantTags.CONSTANT_NameAndType: {
+                    int nameIndex = bytes.getUnsignedShort(at + 1);
+                    CstString name = (CstString) parse0(nameIndex, wasUtf8);
+                    int descriptorIndex = bytes.getUnsignedShort(at + 3);
+                    CstString descriptor = (CstString) parse0(descriptorIndex, wasUtf8);
+                    cst = new CstNat(name, descriptor);
                     break;
-                case 15:
-                    Constant ref;
-                    int kind = this.bytes.getUnsignedByte(at + 1);
-                    int constantIndex = this.bytes.getUnsignedShort(at + 2);
-                    switch (kind) {
-                        case 1:
-                        case 2:
-                        case 3:
-                        case 4:
-                            ref = (CstFieldRef) parse0(constantIndex, wasUtf8);
-                            break;
-                        case 5:
-                        case 8:
-                            CstMethodRef ref2 = (CstMethodRef) parse0(constantIndex, wasUtf8);
-                            break;
-                        case 6:
-                        case 7:
-                            ref = parse0(constantIndex, wasUtf8);
-                            if (!((ref instanceof CstMethodRef) || (ref instanceof CstInterfaceMethodRef))) {
-                                throw new ParseException("Unsupported ref constant type for MethodHandle " + ref.getClass());
-                            }
-                        case 9:
-                            CstInterfaceMethodRef ref3 = (CstInterfaceMethodRef) parse0(constantIndex, wasUtf8);
-                            break;
-                        default:
-                            throw new ParseException("Unsupported MethodHandle kind: " + kind);
-                    }
-                    cst = CstMethodHandle.make(getMethodHandleTypeForKind(kind), ref);
-                    break;
-                case 16:
-                    cst = CstProtoRef.make((CstString) parse0(this.bytes.getUnsignedShort(at + 1), wasUtf8));
-                    break;
-                case 18:
-                    cst = CstInvokeDynamic.make(this.bytes.getUnsignedShort(at + 1), (CstNat) parse0(this.bytes.getUnsignedShort(at + 3), wasUtf8));
-                    break;
-                default:
+                }
+                case ConstantTags.CONSTANT_MethodHandle: {
+                    throw new ParseException("MethodHandle not supported");
+                }
+                case ConstantTags.CONSTANT_MethodType: {
+                    throw new ParseException("MethodType not supported");
+                }
+                case ConstantTags.CONSTANT_InvokeDynamic: {
+                    throw new ParseException("InvokeDynamic not supported");
+                }
+                default: {
                     throw new ParseException("unknown tag byte: " + Hex.u1(tag));
+                }
             }
-            this.pool.set(idx, cst);
-            return cst;
         } catch (ParseException ex) {
-            ex.addContext("...while parsing cst " + Hex.u2(idx) + " at offset " + Hex.u4(at));
+            ex.addContext("...while parsing cst " + Hex.u2(idx) +
+                          " at offset " + Hex.u4(at));
             throw ex;
-        } catch (Throwable ex2) {
-            ParseException parseException = new ParseException(ex2);
-            parseException.addContext("...while parsing cst " + Hex.u2(idx) + " at offset " + Hex.u4(at));
-            throw parseException;
+        } catch (RuntimeException ex) {
+            ParseException pe = new ParseException(ex);
+            pe.addContext("...while parsing cst " + Hex.u2(idx) +
+                          " at offset " + Hex.u4(at));
+            throw pe;
         }
+
+        pool.set(idx, cst);
+        return cst;
     }
 
+    /**
+     * Parses a utf8 constant.
+     *
+     * @param at offset to the start of the constant (where the tag byte is)
+     * @return {@code non-null;} the parsed value
+     */
     private CstString parseUtf8(int at) {
-        int length = this.bytes.getUnsignedShort(at + 1);
-        at += 3;
-        try {
-            return new CstString(this.bytes.slice(at, at + length));
-        } catch (Throwable ex) {
-            throw new ParseException(ex);
-        }
-    }
+        int length = bytes.getUnsignedShort(at + 1);
 
-    private static int getMethodHandleTypeForKind(int kind) {
-        switch (kind) {
-            case 1:
-                return 3;
-            case 2:
-                return 1;
-            case 3:
-                return 2;
-            case 4:
-                return 0;
-            case 5:
-                return 5;
-            case 6:
-                return 4;
-            case 7:
-                return 7;
-            case 8:
-                return 6;
-            case 9:
-                return 8;
-            default:
-                throw new IllegalArgumentException("invalid kind: " + kind);
+        at += 3; // Skip to the data.
+
+        ByteArray ubytes = bytes.slice(at, at + length);
+
+        try {
+            return new CstString(ubytes);
+        } catch (IllegalArgumentException ex) {
+            // Translate the exception
+            throw new ParseException(ex);
         }
     }
 }

@@ -1,3 +1,19 @@
+/*
+ * Copyright (C) 2007 The Android Open Source Project
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
 package com.android.dx.cf.code;
 
 import com.android.dex.util.ExceptionWithContext;
@@ -6,123 +22,189 @@ import com.android.dx.rop.type.Type;
 import com.android.dx.rop.type.TypeBearer;
 import com.android.dx.util.Hex;
 
+/**
+ * Representation of an array of local variables, with Java semantics.
+ *
+ * <p><b>Note:</b> For the most part, the documentation for this class
+ * ignores the distinction between {@link Type} and {@link
+ * TypeBearer}.</p>
+ */
 public class OneLocalsArray extends LocalsArray {
+    /** {@code non-null;} actual array */
     private final TypeBearer[] locals;
 
+    /**
+     * Constructs an instance. The locals array initially consists of
+     * all-uninitialized values (represented as {@code null}s).
+     *
+     * @param maxLocals {@code >= 0;} the maximum number of locals this instance
+     * can refer to
+     */
     public OneLocalsArray(int maxLocals) {
         super(maxLocals != 0);
-        this.locals = new TypeBearer[maxLocals];
+        locals = new TypeBearer[maxLocals];
     }
 
+    /** @inheritDoc */
     public OneLocalsArray copy() {
-        OneLocalsArray result = new OneLocalsArray(this.locals.length);
-        System.arraycopy(this.locals, 0, result.locals, 0, this.locals.length);
+        OneLocalsArray result = new OneLocalsArray(locals.length);
+
+        System.arraycopy(locals, 0, result.locals, 0, locals.length);
+
         return result;
     }
 
+    /** @inheritDoc */
     public void annotate(ExceptionWithContext ex) {
-        for (int i = 0; i < this.locals.length; i++) {
-            TypeBearer type = this.locals[i];
-            ex.addContext("locals[" + Hex.u2(i) + "]: " + (type == null ? "<invalid>" : type.toString()));
+        for (int i = 0; i < locals.length; i++) {
+            TypeBearer type = locals[i];
+            String s = (type == null) ? "<invalid>" : type.toString();
+            ex.addContext("locals[" + Hex.u2(i) + "]: " + s);
         }
     }
 
+    /** {@inheritDoc*/
     public String toHuman() {
         StringBuilder sb = new StringBuilder();
-        for (int i = 0; i < this.locals.length; i++) {
-            TypeBearer type = this.locals[i];
-            sb.append("locals[" + Hex.u2(i) + "]: " + (type == null ? "<invalid>" : type.toString()) + "\n");
+
+        for (int i = 0; i < locals.length; i++) {
+            TypeBearer type = locals[i];
+            String s = (type == null) ? "<invalid>" : type.toString();
+            sb.append("locals[" + Hex.u2(i) + "]: " + s + "\n");
         }
+
         return sb.toString();
     }
 
+    /** @inheritDoc */
     public void makeInitialized(Type type) {
-        int len = this.locals.length;
-        if (len != 0) {
-            throwIfImmutable();
-            Type initializedType = type.getInitializedType();
-            for (int i = 0; i < len; i++) {
-                if (this.locals[i] == type) {
-                    this.locals[i] = initializedType;
-                }
+        int len = locals.length;
+
+        if (len == 0) {
+            // We have to check for this before checking for immutability.
+            return;
+        }
+
+        throwIfImmutable();
+
+        Type initializedType = type.getInitializedType();
+
+        for (int i = 0; i < len; i++) {
+            if (locals[i] == type) {
+                locals[i] = initializedType;
             }
         }
     }
 
+    /** @inheritDoc */
     public int getMaxLocals() {
-        return this.locals.length;
+        return locals.length;
     }
 
+    /** @inheritDoc */
     public void set(int idx, TypeBearer type) {
         throwIfImmutable();
+
         try {
             type = type.getFrameType();
-            if (idx < 0) {
-                throw new IndexOutOfBoundsException("idx < 0");
-            }
-            if (type.getType().isCategory2()) {
-                this.locals[idx + 1] = null;
-            }
-            this.locals[idx] = type;
-            if (idx != 0) {
-                TypeBearer prev = this.locals[idx - 1];
-                if (prev != null && prev.getType().isCategory2()) {
-                    this.locals[idx - 1] = null;
-                }
-            }
-        } catch (NullPointerException e) {
+        } catch (NullPointerException ex) {
+            // Elucidate the exception
             throw new NullPointerException("type == null");
+        }
+
+        if (idx < 0) {
+            throw new IndexOutOfBoundsException("idx < 0");
+        }
+
+        // Make highest possible out-of-bounds check happen first.
+        if (type.getType().isCategory2()) {
+            locals[idx + 1] = null;
+        }
+
+        locals[idx] = type;
+
+        if (idx != 0) {
+            TypeBearer prev = locals[idx - 1];
+            if ((prev != null) && prev.getType().isCategory2()) {
+                locals[idx - 1] = null;
+            }
         }
     }
 
+    /** @inheritDoc */
     public void set(RegisterSpec spec) {
         set(spec.getReg(), spec);
     }
 
+    /** @inheritDoc */
     public void invalidate(int idx) {
         throwIfImmutable();
-        this.locals[idx] = null;
+        locals[idx] = null;
     }
 
+    /** @inheritDoc */
     public TypeBearer getOrNull(int idx) {
-        return this.locals[idx];
+        return locals[idx];
     }
 
+    /** @inheritDoc */
     public TypeBearer get(int idx) {
-        TypeBearer result = this.locals[idx];
+        TypeBearer result = locals[idx];
+
         if (result == null) {
             return throwSimException(idx, "invalid");
         }
+
         return result;
     }
 
+    /** @inheritDoc */
     public TypeBearer getCategory1(int idx) {
         TypeBearer result = get(idx);
         Type type = result.getType();
+
         if (type.isUninitialized()) {
             return throwSimException(idx, "uninitialized instance");
         }
+
         if (type.isCategory2()) {
             return throwSimException(idx, "category-2");
         }
+
         return result;
     }
 
+    /** @inheritDoc */
     public TypeBearer getCategory2(int idx) {
         TypeBearer result = get(idx);
+
         if (result.getType().isCategory1()) {
             return throwSimException(idx, "category-1");
         }
+
         return result;
     }
 
+    /** @inheritDoc */
+    @Override
     public LocalsArray merge(LocalsArray other) {
         if (other instanceof OneLocalsArray) {
-            return merge((OneLocalsArray) other);
+            return merge((OneLocalsArray)other);
+        } else { //LocalsArraySet
+            // LocalsArraySet knows how to merge me.
+            return other.merge(this);
         }
-        return other.merge(this);
     }
 
+    /**
+     * Merges this OneLocalsArray instance with another OneLocalsArray
+     * instance. A more-refined version of {@link #merge(LocalsArray) merge}
+     * which is called by that method when appropriate.
+     *
+     * @param other locals array with which to merge
+     * @return this instance if merge was a no-op, or a new instance if
+     * the merge resulted in a change.
+     */
     public OneLocalsArray merge(OneLocalsArray other) {
         try {
             return Merger.mergeLocals(this, other);
@@ -135,14 +217,28 @@ public class OneLocalsArray extends LocalsArray {
         }
     }
 
-    public LocalsArraySet mergeWithSubroutineCaller(LocalsArray other, int predLabel) {
-        return new LocalsArraySet(getMaxLocals()).mergeWithSubroutineCaller(other, predLabel);
+    /** @inheritDoc */
+    @Override
+    public LocalsArraySet mergeWithSubroutineCaller
+            (LocalsArray other, int predLabel) {
+
+        LocalsArraySet result = new LocalsArraySet(getMaxLocals());
+        return result.mergeWithSubroutineCaller(other, predLabel);
     }
 
+    /**{@inheritDoc}*/
+    @Override
     protected OneLocalsArray getPrimary() {
         return this;
     }
 
+    /**
+     * Throws a properly-formatted exception.
+     *
+     * @param idx the salient local index
+     * @param msg {@code non-null;} useful message
+     * @return never (keeps compiler happy)
+     */
     private static TypeBearer throwSimException(int idx, String msg) {
         throw new SimException("local " + Hex.u2(idx) + ": " + msg);
     }

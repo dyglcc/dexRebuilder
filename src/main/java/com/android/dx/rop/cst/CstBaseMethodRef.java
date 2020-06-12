@@ -1,314 +1,151 @@
+/*
+ * Copyright (C) 2007 The Android Open Source Project
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
 package com.android.dx.rop.cst;
 
 import com.android.dx.rop.type.Prototype;
 import com.android.dx.rop.type.Type;
+import com.android.dx.rop.type.TypeBearer;
 
-public abstract class CstBaseMethodRef extends CstMemberRef {
-    private Prototype instancePrototype;
+/**
+ * Base class for constants of "methodish" type.
+ *
+ * <p><b>Note:</b> As a {@link TypeBearer}, this class bears the return type
+ * of the method.</p>
+ */
+public abstract class CstBaseMethodRef
+        extends CstMemberRef {
+    /** {@code non-null;} the raw prototype for this method */
     private final Prototype prototype;
 
-    CstBaseMethodRef(CstType definingClass, CstNat nat) {
+    /**
+     * {@code null-ok;} the prototype for this method taken to be an instance
+     * method, or {@code null} if not yet calculated
+     */
+    private Prototype instancePrototype;
+
+    /**
+     * Constructs an instance.
+     *
+     * @param definingClass {@code non-null;} the type of the defining class
+     * @param nat {@code non-null;} the name-and-type
+     */
+    /*package*/ CstBaseMethodRef(CstType definingClass, CstNat nat) {
         super(definingClass, nat);
+
         String descriptor = getNat().getDescriptor().getString();
-        if (isSignaturePolymorphic()) {
-            this.prototype = Prototype.fromDescriptor(descriptor);
-        } else {
-            this.prototype = Prototype.intern(descriptor);
-        }
+        this.prototype = Prototype.intern(descriptor);
         this.instancePrototype = null;
     }
 
+    /**
+     * Gets the raw prototype of this method. This doesn't include a
+     * {@code this} argument.
+     *
+     * @return {@code non-null;} the method prototype
+     */
     public final Prototype getPrototype() {
-        return this.prototype;
+        return prototype;
     }
 
+    /**
+     * Gets the prototype of this method as either a
+     * {@code static} or instance method. In the case of a
+     * {@code static} method, this is the same as the raw
+     * prototype. In the case of an instance method, this has an
+     * appropriately-typed {@code this} argument as the first
+     * one.
+     *
+     * @param isStatic whether the method should be considered static
+     * @return {@code non-null;} the method prototype
+     */
     public final Prototype getPrototype(boolean isStatic) {
         if (isStatic) {
-            return this.prototype;
+            return prototype;
+        } else {
+            if (instancePrototype == null) {
+                Type thisType = getDefiningClass().getClassType();
+                instancePrototype = prototype.withFirstParameter(thisType);
+            }
+            return instancePrototype;
         }
-        if (this.instancePrototype == null) {
-            this.instancePrototype = this.prototype.withFirstParameter(getDefiningClass().getClassType());
-        }
-        return this.instancePrototype;
     }
 
+    /** {@inheritDoc} */
+    @Override
     protected final int compareTo0(Constant other) {
         int cmp = super.compareTo0(other);
+
         if (cmp != 0) {
             return cmp;
         }
-        return this.prototype.compareTo(((CstBaseMethodRef) other).prototype);
+
+        CstBaseMethodRef otherMethod = (CstBaseMethodRef) other;
+        return prototype.compareTo(otherMethod.prototype);
     }
 
+    /**
+     * {@inheritDoc}
+     *
+     * In this case, this method returns the <i>return type</i> of this method.
+     *
+     * @return {@code non-null;} the method's return type
+     */
     public final Type getType() {
-        return this.prototype.getReturnType();
+        return prototype.getReturnType();
     }
 
+    /**
+     * Gets the number of words of parameters required by this
+     * method's descriptor. Since instances of this class have no way
+     * to know if they will be used in a {@code static} or
+     * instance context, one has to indicate this explicitly as an
+     * argument. This method is just a convenient shorthand for
+     * {@code getPrototype().getParameterTypes().getWordCount()},
+     * plus {@code 1} if the method is to be treated as an
+     * instance method.
+     *
+     * @param isStatic whether the method should be considered static
+     * @return {@code >= 0;} the argument word count
+     */
     public final int getParameterWordCount(boolean isStatic) {
         return getPrototype(isStatic).getParameterTypes().getWordCount();
     }
 
+    /**
+     * Gets whether this is a reference to an instance initialization
+     * method. This is just a convenient shorthand for
+     * {@code getNat().isInstanceInit()}.
+     *
+     * @return {@code true} iff this is a reference to an
+     * instance initialization method
+     */
     public final boolean isInstanceInit() {
         return getNat().isInstanceInit();
     }
 
+    /**
+     * Gets whether this is a reference to a class initialization
+     * method. This is just a convenient shorthand for
+     * {@code getNat().isClassInit()}.
+     *
+     * @return {@code true} iff this is a reference to an
+     * instance initialization method
+     */
     public final boolean isClassInit() {
         return getNat().isClassInit();
-    }
-
-    public final boolean isSignaturePolymorphic() {
-        boolean z = true;
-        CstType definingClass = getDefiningClass();
-        String string;
-        if (!definingClass.equals(CstType.METHOD_HANDLE)) {
-            if (definingClass.equals(CstType.VAR_HANDLE)) {
-                string = getNat().getName().getString();
-                switch (string.hashCode()) {
-                    case -1946504908:
-                        if (string.equals("getAndBitwiseOrRelease")) {
-                            z = true;
-                            break;
-                        }
-                        break;
-                    case -1686727776:
-                        if (string.equals("getAndBitwiseAndRelease")) {
-                            z = true;
-                            break;
-                        }
-                        break;
-                    case -1671098288:
-                        if (string.equals("compareAndSet")) {
-                            z = true;
-                            break;
-                        }
-                        break;
-                    case -1292078254:
-                        if (string.equals("compareAndExchangeRelease")) {
-                            z = true;
-                            break;
-                        }
-                        break;
-                    case -1117944904:
-                        if (string.equals("weakCompareAndSet")) {
-                            z = true;
-                            break;
-                        }
-                        break;
-                    case -1103072857:
-                        if (string.equals("getAndAddRelease")) {
-                            z = true;
-                            break;
-                        }
-                        break;
-                    case -1032914329:
-                        if (string.equals("getAndBitwiseAnd")) {
-                            z = true;
-                            break;
-                        }
-                        break;
-                    case -1032892181:
-                        if (string.equals("getAndBitwiseXor")) {
-                            z = true;
-                            break;
-                        }
-                        break;
-                    case -794517348:
-                        if (string.equals("getAndBitwiseXorRelease")) {
-                            z = true;
-                            break;
-                        }
-                        break;
-                    case -567150350:
-                        if (string.equals("weakCompareAndSetPlain")) {
-                            z = true;
-                            break;
-                        }
-                        break;
-                    case -240822786:
-                        if (string.equals("weakCompareAndSetAcquire")) {
-                            z = true;
-                            break;
-                        }
-                        break;
-                    case -230706875:
-                        if (string.equals("setRelease")) {
-                            z = true;
-                            break;
-                        }
-                        break;
-                    case -127361888:
-                        if (string.equals("getAcquire")) {
-                            z = true;
-                            break;
-                        }
-                        break;
-                    case -37641530:
-                        if (string.equals("getAndSetRelease")) {
-                            z = true;
-                            break;
-                        }
-                        break;
-                    case 102230:
-                        if (string.equals("get")) {
-                            z = true;
-                            break;
-                        }
-                        break;
-                    case 113762:
-                        if (string.equals("set")) {
-                            z = true;
-                            break;
-                        }
-                        break;
-                    case 93645315:
-                        if (string.equals("getAndBitwiseOrAcquire")) {
-                            z = true;
-                            break;
-                        }
-                        break;
-                    case 101293086:
-                        if (string.equals("setVolatile")) {
-                            z = true;
-                            break;
-                        }
-                        break;
-                    case 189872914:
-                        if (string.equals("getVolatile")) {
-                            z = true;
-                            break;
-                        }
-                        break;
-                    case 282707520:
-                        if (string.equals("getAndAdd")) {
-                            z = true;
-                            break;
-                        }
-                        break;
-                    case 282724865:
-                        if (string.equals("getAndSet")) {
-                            z = true;
-                            break;
-                        }
-                        break;
-                    case 353422447:
-                        if (string.equals("getAndBitwiseAndAcquire")) {
-                            z = true;
-                            break;
-                        }
-                        break;
-                    case 470702883:
-                        if (string.equals("setOpaque")) {
-                            z = true;
-                            break;
-                        }
-                        break;
-                    case 685319959:
-                        if (string.equals("getOpaque")) {
-                            z = true;
-                            break;
-                        }
-                        break;
-                    case 748071969:
-                        if (string.equals("compareAndExchangeAcquire")) {
-                            z = true;
-                            break;
-                        }
-                        break;
-                    case 937077366:
-                        if (string.equals("getAndAddAcquire")) {
-                            z = true;
-                            break;
-                        }
-                        break;
-                    case 1245632875:
-                        if (string.equals("getAndBitwiseXorAcquire")) {
-                            z = true;
-                            break;
-                        }
-                        break;
-                    case 1352153939:
-                        if (string.equals("getAndBitwiseOr")) {
-                            z = true;
-                            break;
-                        }
-                        break;
-                    case 1483964149:
-                        if (string.equals("compareAndExchange")) {
-                            z = false;
-                            break;
-                        }
-                        break;
-                    case 2002508693:
-                        if (string.equals("getAndSetAcquire")) {
-                            z = true;
-                            break;
-                        }
-                        break;
-                    case 2013994287:
-                        if (string.equals("weakCompareAndSetRelease")) {
-                            z = true;
-                            break;
-                        }
-                        break;
-                }
-                switch (z) {
-                    case false:
-                    case true:
-                    case true:
-                    case true:
-                    case true:
-                    case true:
-                    case true:
-                    case true:
-                    case true:
-                    case true:
-                    case true:
-                    case true:
-                    case true:
-                    case true:
-                    case true:
-                    case true:
-                    case true:
-                    case true:
-                    case true:
-                    case true:
-                    case true:
-                    case true:
-                    case true:
-                    case true:
-                    case true:
-                    case true:
-                    case true:
-                    case true:
-                    case true:
-                    case true:
-                    case true:
-                        return true;
-                    default:
-                        break;
-                }
-            }
-        }
-        string = getNat().getName().getString();
-        switch (string.hashCode()) {
-            case -1183693704:
-                if (string.equals("invoke")) {
-                    z = false;
-                    break;
-                }
-                break;
-            case 941760871:
-                if (string.equals("invokeExact")) {
-                    z = true;
-                    break;
-                }
-                break;
-        }
-        switch (z) {
-            case false:
-            case true:
-                return true;
-        }
-        return false;
     }
 }

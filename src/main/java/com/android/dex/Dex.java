@@ -1,13 +1,29 @@
+/*
+ * Copyright (C) 2011 The Android Open Source Project
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
 package com.android.dex;
 
-import com.android.dex.ClassData.Field;
-import com.android.dex.ClassData.Method;
-import com.android.dex.Code.CatchHandler;
-import com.android.dex.Code.Try;
-import com.android.dex.MethodHandle.MethodHandleType;
-import com.android.dex.util.ByteInput;
 import com.android.dex.util.ByteOutput;
+import com.android.dex.util.ByteInput;
+import com.android.dex.util.FileUtils;
+
 import java.io.ByteArrayOutputStream;
+import java.io.File;
+import java.io.FileInputStream;
+import java.io.FileOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
@@ -23,107 +39,479 @@ import java.util.List;
 import java.util.NoSuchElementException;
 import java.util.RandomAccess;
 import java.util.zip.Adler32;
+import java.util.zip.ZipEntry;
+import java.util.zip.ZipFile;
 
+/**
+ * The bytes of a dex file in memory for reading and writing. All int offsets
+ * are unsigned.
+ */
 public final class Dex {
     private static final int CHECKSUM_OFFSET = 8;
     private static final int CHECKSUM_SIZE = 4;
-    static final short[] EMPTY_SHORT_ARRAY = new short[0];
-    private static final int SIGNATURE_OFFSET = 12;
+    private static final int SIGNATURE_OFFSET = CHECKSUM_OFFSET + CHECKSUM_SIZE;
     private static final int SIGNATURE_SIZE = 20;
+    // Provided as a convenience to avoid a memory allocation to benefit Dalvik.
+    // Note: libcore.util.EmptyArray cannot be accessed when this code isn't run on Dalvik.
+    static final short[] EMPTY_SHORT_ARRAY = new short[0];
+
     private ByteBuffer data;
-    private final FieldIdTable fieldIds;
-    private final MethodIdTable methodIds;
-    private int nextSectionStart;
-    private final ProtoIdTable protoIds;
-    private final StringTable strings;
-    private final TableOfContents tableOfContents;
-    private final TypeIndexToDescriptorIndexTable typeIds;
-    private final TypeIndexToDescriptorTable typeNames;
+    private final TableOfContents tableOfContents = new TableOfContents();
+    private int nextSectionStart = 0;
+    private final StringTable strings = new StringTable();
+    private final TypeIndexToDescriptorIndexTable typeIds = new TypeIndexToDescriptorIndexTable();
+    private final TypeIndexToDescriptorTable typeNames = new TypeIndexToDescriptorTable();
+    private final ProtoIdTable protoIds = new ProtoIdTable();
+    private final FieldIdTable fieldIds = new FieldIdTable();
+    private final MethodIdTable methodIds = new MethodIdTable();
 
-    private final class ClassDefIterable implements Iterable<ClassDef> {
-        private ClassDefIterable() {
-        }
+    /**
+     * Creates a new dex that reads from {@code data}. It is an error to modify
+     * {@code data} after using it to create a dex buffer.
+     */
+    public Dex(byte[] data) throws IOException {
+        this(ByteBuffer.wrap(data));
+    }
 
-        public Iterator<ClassDef> iterator() {
-            if (Dex.this.tableOfContents.classDefs.exists()) {
-                return new ClassDefIterator();
+    private Dex(ByteBuffer data) throws IOException {
+        this.data = data;
+        this.data.order(ByteOrder.LITTLE_ENDIAN);
+        this.tableOfContents.readFrom(this);
+    }
+
+    /**
+     * Creates a new empty dex of the specified size.
+     */
+    public Dex(int byteCount) throws IOException {
+        this.data = ByteBuffer.wrap(new byte[byteCount]);
+        this.data.order(ByteOrder.LITTLE_ENDIAN);
+    }
+
+    /**
+     * Creates a new dex buffer of the dex in {@code in}, and closes {@code in}.
+     */
+    public Dex(InputStream in) throws IOException {
+        loadFrom(in);
+    }
+
+    /**
+     * Creates a new dex buffer from the dex file {@code file}.
+     */
+    public Dex(File file) throws IOException {
+        if (FileUtils.hasArchiveSuffix(file.getName())) {
+            ZipFile zipFile = new ZipFile(file);
+            ZipEntry entry = zipFile.getEntry(DexFormat.DEX_IN_JAR_NAME);
+            if (entry != null) {
+                loadFrom(zipFile.getInputStream(entry));
+                zipFile.close();
+            } else {
+                throw new DexException("Expected " + DexFormat.DEX_IN_JAR_NAME + " in " + file);
             }
-            return Collections.emptySet().iterator();
+        } else if (file.getName().endsWith(".dex")) {
+            loadFrom(new FileInputStream(file));
+        } else {
+            throw new DexException("unknown output extension: " + file);
         }
     }
 
-    private final class ClassDefIterator implements Iterator<ClassDef> {
-        private int count;
-        private final Section in;
+    /**
+     * Creates a new dex from the contents of {@code bytes}. This API supports
+     * both {@code .dex} and {@code .odex} input. Calling this constructor
+     * transfers ownership of {@code bytes} to the returned Dex: it is an error
+     * to access the buffer after calling this method.
+     */
+    public static Dex create(ByteBuffer data) throws IOException {
+        data.order(ByteOrder.LITTLE_ENDIAN);
 
-        private ClassDefIterator() {
-            this.in = Dex.this.open(Dex.this.tableOfContents.classDefs.off);
-            this.count = 0;
+        // if it's an .odex file, set position and limit to the .dex section
+        if (data.get(0) == 'd'
+                && data.get(1) == 'e'
+                && data.get(2) == 'y'
+                && data.get(3) == '\n') {
+            data.position(8);
+            int offset = data.getInt();
+            int length = data.getInt();
+            data.position(offset);
+            data.limit(offset + length);
+            data = data.slice();
         }
 
-        public boolean hasNext() {
-            return this.count < Dex.this.tableOfContents.classDefs.size;
-        }
+        return new Dex(data);
+    }
 
-        public ClassDef next() {
-            if (hasNext()) {
-                this.count++;
-                return this.in.readClassDef();
+    private void loadFrom(InputStream in) throws IOException {
+        ByteArrayOutputStream bytesOut = new ByteArrayOutputStream();
+        byte[] buffer = new byte[8192];
+
+        int count;
+        while ((count = in.read(buffer)) != -1) {
+            bytesOut.write(buffer, 0, count);
+        }
+        in.close();
+
+        this.data = ByteBuffer.wrap(bytesOut.toByteArray());
+        this.data.order(ByteOrder.LITTLE_ENDIAN);
+        this.tableOfContents.readFrom(this);
+    }
+
+    private static void checkBounds(int index, int length) {
+        if (index < 0 || index >= length) {
+            throw new IndexOutOfBoundsException("index:" + index + ", length=" + length);
+        }
+    }
+
+    public void writeTo(OutputStream out) throws IOException {
+        byte[] buffer = new byte[8192];
+        ByteBuffer data = this.data.duplicate(); // positioned ByteBuffers aren't thread safe
+        data.clear();
+        while (data.hasRemaining()) {
+            int count = Math.min(buffer.length, data.remaining());
+            data.get(buffer, 0, count);
+            out.write(buffer, 0, count);
+        }
+    }
+
+    public void writeTo(File dexOut) throws IOException {
+        OutputStream out = new FileOutputStream(dexOut);
+        writeTo(out);
+        out.close();
+    }
+
+    public TableOfContents getTableOfContents() {
+        return tableOfContents;
+    }
+
+    public Section open(int position) {
+        if (position < 0 || position >= data.capacity()) {
+            throw new IllegalArgumentException("position=" + position
+                    + " length=" + data.capacity());
+        }
+        ByteBuffer sectionData = data.duplicate();
+        sectionData.order(ByteOrder.LITTLE_ENDIAN); // necessary?
+        sectionData.position(position);
+        sectionData.limit(data.capacity());
+        return new Section("section", sectionData);
+    }
+
+    public Section appendSection(int maxByteCount, String name) {
+        if ((maxByteCount & 3) != 0) {
+            throw new IllegalStateException("Not four byte aligned!");
+        }
+        int limit = nextSectionStart + maxByteCount;
+        ByteBuffer sectionData = data.duplicate();
+        sectionData.order(ByteOrder.LITTLE_ENDIAN); // necessary?
+        sectionData.position(nextSectionStart);
+        sectionData.limit(limit);
+        Section result = new Section(name, sectionData);
+        nextSectionStart = limit;
+        return result;
+    }
+
+    public int getLength() {
+        return data.capacity();
+    }
+
+    public int getNextSectionStart() {
+        return nextSectionStart;
+    }
+
+    /**
+     * Returns a copy of the the bytes of this dex.
+     */
+    public byte[] getBytes() {
+        ByteBuffer data = this.data.duplicate(); // positioned ByteBuffers aren't thread safe
+        byte[] result = new byte[data.capacity()];
+        data.position(0);
+        data.get(result);
+        return result;
+    }
+
+    public List<String> strings() {
+        return strings;
+    }
+
+    public List<Integer> typeIds() {
+        return typeIds;
+    }
+
+    public List<String> typeNames() {
+        return typeNames;
+    }
+
+    public List<ProtoId> protoIds() {
+        return protoIds;
+    }
+
+    public List<FieldId> fieldIds() {
+        return fieldIds;
+    }
+
+    public List<MethodId> methodIds() {
+        return methodIds;
+    }
+
+    public Iterable<ClassDef> classDefs() {
+        return new ClassDefIterable();
+    }
+
+    public TypeList readTypeList(int offset) {
+        if (offset == 0) {
+            return TypeList.EMPTY;
+        }
+        return open(offset).readTypeList();
+    }
+
+    public ClassData readClassData(ClassDef classDef) {
+        int offset = classDef.getClassDataOffset();
+        if (offset == 0) {
+            throw new IllegalArgumentException("offset == 0");
+        }
+        return open(offset).readClassData();
+    }
+
+    public Code readCode(ClassData.Method method) {
+        int offset = method.getCodeOffset();
+        if (offset == 0) {
+            throw new IllegalArgumentException("offset == 0");
+        }
+        return open(offset).readCode();
+    }
+
+    /**
+     * Returns the signature of all but the first 32 bytes of this dex. The
+     * first 32 bytes of dex files are not specified to be included in the
+     * signature.
+     */
+    public byte[] computeSignature() throws IOException {
+        MessageDigest digest;
+        try {
+            digest = MessageDigest.getInstance("SHA-1");
+        } catch (NoSuchAlgorithmException e) {
+            throw new AssertionError();
+        }
+        byte[] buffer = new byte[8192];
+        ByteBuffer data = this.data.duplicate(); // positioned ByteBuffers aren't thread safe
+        data.limit(data.capacity());
+        data.position(SIGNATURE_OFFSET + SIGNATURE_SIZE);
+        while (data.hasRemaining()) {
+            int count = Math.min(buffer.length, data.remaining());
+            data.get(buffer, 0, count);
+            digest.update(buffer, 0, count);
+        }
+        return digest.digest();
+    }
+
+    /**
+     * Returns the checksum of all but the first 12 bytes of {@code dex}.
+     */
+    public int computeChecksum() throws IOException {
+        Adler32 adler32 = new Adler32();
+        byte[] buffer = new byte[8192];
+        ByteBuffer data = this.data.duplicate(); // positioned ByteBuffers aren't thread safe
+        data.limit(data.capacity());
+        data.position(CHECKSUM_OFFSET + CHECKSUM_SIZE);
+        while (data.hasRemaining()) {
+            int count = Math.min(buffer.length, data.remaining());
+            data.get(buffer, 0, count);
+            adler32.update(buffer, 0, count);
+        }
+        return (int) adler32.getValue();
+    }
+
+    /**
+     * Generates the signature and checksum of the dex file {@code out} and
+     * writes them to the file.
+     */
+    public void writeHashes() throws IOException {
+        open(SIGNATURE_OFFSET).write(computeSignature());
+        open(CHECKSUM_OFFSET).writeInt(computeChecksum());
+    }
+
+    /**
+     * Look up a field id name index from a field index. Cheaper than:
+     * {@code fieldIds().get(fieldDexIndex).getNameIndex();}
+     */
+    public int nameIndexFromFieldIndex(int fieldIndex) {
+        checkBounds(fieldIndex, tableOfContents.fieldIds.size);
+        int position = tableOfContents.fieldIds.off + (SizeOf.MEMBER_ID_ITEM * fieldIndex);
+        position += SizeOf.USHORT;  // declaringClassIndex
+        position += SizeOf.USHORT;  // typeIndex
+        return data.getInt(position);  // nameIndex
+    }
+
+    public int findStringIndex(String s) {
+        return Collections.binarySearch(strings, s);
+    }
+
+    public int findTypeIndex(String descriptor) {
+        return Collections.binarySearch(typeNames, descriptor);
+    }
+
+    public int findFieldIndex(FieldId fieldId) {
+        return Collections.binarySearch(fieldIds, fieldId);
+    }
+
+    public int findMethodIndex(MethodId methodId) {
+        return Collections.binarySearch(methodIds, methodId);
+    }
+
+    public int findClassDefIndexFromTypeIndex(int typeIndex) {
+        checkBounds(typeIndex, tableOfContents.typeIds.size);
+        if (!tableOfContents.classDefs.exists()) {
+            return -1;
+        }
+        for (int i = 0; i < tableOfContents.classDefs.size; i++) {
+            if (typeIndexFromClassDefIndex(i) == typeIndex) {
+                return i;
             }
-            throw new NoSuchElementException();
         }
-
-        public void remove() {
-            throw new UnsupportedOperationException();
-        }
+        return -1;
     }
 
-    private final class FieldIdTable extends AbstractList<FieldId> implements RandomAccess {
-        private FieldIdTable() {
-        }
-
-        public FieldId get(int index) {
-            Dex.checkBounds(index, Dex.this.tableOfContents.fieldIds.size);
-            return Dex.this.open(Dex.this.tableOfContents.fieldIds.off + (index * 8)).readFieldId();
-        }
-
-        public int size() {
-            return Dex.this.tableOfContents.fieldIds.size;
-        }
+    /**
+     * Look up a field id type index from a field index. Cheaper than:
+     * {@code fieldIds().get(fieldDexIndex).getTypeIndex();}
+     */
+    public int typeIndexFromFieldIndex(int fieldIndex) {
+        checkBounds(fieldIndex, tableOfContents.fieldIds.size);
+        int position = tableOfContents.fieldIds.off + (SizeOf.MEMBER_ID_ITEM * fieldIndex);
+        position += SizeOf.USHORT;  // declaringClassIndex
+        return data.getShort(position) & 0xFFFF;  // typeIndex
     }
 
-    private final class MethodIdTable extends AbstractList<MethodId> implements RandomAccess {
-        private MethodIdTable() {
-        }
-
-        public MethodId get(int index) {
-            Dex.checkBounds(index, Dex.this.tableOfContents.methodIds.size);
-            return Dex.this.open(Dex.this.tableOfContents.methodIds.off + (index * 8)).readMethodId();
-        }
-
-        public int size() {
-            return Dex.this.tableOfContents.methodIds.size;
-        }
+    /**
+     * Look up a method id declaring class index from a method index. Cheaper than:
+     * {@code methodIds().get(methodIndex).getDeclaringClassIndex();}
+     */
+    public int declaringClassIndexFromMethodIndex(int methodIndex) {
+        checkBounds(methodIndex, tableOfContents.methodIds.size);
+        int position = tableOfContents.methodIds.off + (SizeOf.MEMBER_ID_ITEM * methodIndex);
+        return data.getShort(position) & 0xFFFF;  // declaringClassIndex
     }
 
-    private final class ProtoIdTable extends AbstractList<ProtoId> implements RandomAccess {
-        private ProtoIdTable() {
-        }
+    /**
+     * Look up a method id name index from a method index. Cheaper than:
+     * {@code methodIds().get(methodIndex).getNameIndex();}
+     */
+    public int nameIndexFromMethodIndex(int methodIndex) {
+        checkBounds(methodIndex, tableOfContents.methodIds.size);
+        int position = tableOfContents.methodIds.off + (SizeOf.MEMBER_ID_ITEM * methodIndex);
+        position += SizeOf.USHORT;  // declaringClassIndex
+        position += SizeOf.USHORT;  // protoIndex
+        return data.getInt(position);  // nameIndex
+    }
 
-        public ProtoId get(int index) {
-            Dex.checkBounds(index, Dex.this.tableOfContents.protoIds.size);
-            return Dex.this.open(Dex.this.tableOfContents.protoIds.off + (index * 12)).readProtoId();
+    /**
+     * Look up a parameter type ids from a method index. Cheaper than:
+     * {@code readTypeList(protoIds.get(methodIds().get(methodDexIndex).getProtoIndex()).getParametersOffset()).getTypes();}
+     */
+    public short[] parameterTypeIndicesFromMethodIndex(int methodIndex) {
+        checkBounds(methodIndex, tableOfContents.methodIds.size);
+        int position = tableOfContents.methodIds.off + (SizeOf.MEMBER_ID_ITEM * methodIndex);
+        position += SizeOf.USHORT;  // declaringClassIndex
+        int protoIndex = data.getShort(position) & 0xFFFF;
+        checkBounds(protoIndex, tableOfContents.protoIds.size);
+        position = tableOfContents.protoIds.off + (SizeOf.PROTO_ID_ITEM * protoIndex);
+        position += SizeOf.UINT;  // shortyIndex
+        position += SizeOf.UINT;  // returnTypeIndex
+        int parametersOffset = data.getInt(position);
+        if (parametersOffset == 0) {
+            return EMPTY_SHORT_ARRAY;
         }
+        position = parametersOffset;
+        int size = data.getInt(position);
+        if (size <= 0) {
+            throw new AssertionError("Unexpected parameter type list size: " + size);
+        }
+        position += SizeOf.UINT;
+        short[] types = new short[size];
+        for (int i = 0; i < size; i++) {
+            types[i] = data.getShort(position);
+            position += SizeOf.USHORT;
+        }
+        return types;
+    }
 
-        public int size() {
-            return Dex.this.tableOfContents.protoIds.size;
+    /**
+     * Look up a method id return type index from a method index. Cheaper than:
+     * {@code protoIds().get(methodIds().get(methodDexIndex).getProtoIndex()).getReturnTypeIndex();}
+     */
+    public int returnTypeIndexFromMethodIndex(int methodIndex) {
+        checkBounds(methodIndex, tableOfContents.methodIds.size);
+        int position = tableOfContents.methodIds.off + (SizeOf.MEMBER_ID_ITEM * methodIndex);
+        position += SizeOf.USHORT;  // declaringClassIndex
+        int protoIndex = data.getShort(position) & 0xFFFF;
+        checkBounds(protoIndex, tableOfContents.protoIds.size);
+        position = tableOfContents.protoIds.off + (SizeOf.PROTO_ID_ITEM * protoIndex);
+        position += SizeOf.UINT;  // shortyIndex
+        return data.getInt(position);  // returnTypeIndex
+    }
+
+    /**
+     * Look up a descriptor index from a type index. Cheaper than:
+     * {@code open(tableOfContents.typeIds.off + (index * SizeOf.TYPE_ID_ITEM)).readInt();}
+     */
+    public int descriptorIndexFromTypeIndex(int typeIndex) {
+       checkBounds(typeIndex, tableOfContents.typeIds.size);
+       int position = tableOfContents.typeIds.off + (SizeOf.TYPE_ID_ITEM * typeIndex);
+       return data.getInt(position);
+    }
+
+    /**
+     * Look up a type index index from a class def index.
+     */
+    public int typeIndexFromClassDefIndex(int classDefIndex) {
+        checkBounds(classDefIndex, tableOfContents.classDefs.size);
+        int position = tableOfContents.classDefs.off + (SizeOf.CLASS_DEF_ITEM * classDefIndex);
+        return data.getInt(position);
+    }
+
+    /**
+     * Look up an annotation directory offset from a class def index.
+     */
+    public int annotationDirectoryOffsetFromClassDefIndex(int classDefIndex) {
+        checkBounds(classDefIndex, tableOfContents.classDefs.size);
+        int position = tableOfContents.classDefs.off + (SizeOf.CLASS_DEF_ITEM * classDefIndex);
+        position += SizeOf.UINT;  // type
+        position += SizeOf.UINT;  // accessFlags
+        position += SizeOf.UINT;  // superType
+        position += SizeOf.UINT;  // interfacesOffset
+        position += SizeOf.UINT;  // sourceFileIndex
+        return data.getInt(position);
+    }
+
+    /**
+     * Look up interface types indices from a  return type index from a method index. Cheaper than:
+     * {@code ...getClassDef(classDefIndex).getInterfaces();}
+     */
+    public short[] interfaceTypeIndicesFromClassDefIndex(int classDefIndex) {
+        checkBounds(classDefIndex, tableOfContents.classDefs.size);
+        int position = tableOfContents.classDefs.off + (SizeOf.CLASS_DEF_ITEM * classDefIndex);
+        position += SizeOf.UINT;  // type
+        position += SizeOf.UINT;  // accessFlags
+        position += SizeOf.UINT;  // superType
+        int interfacesOffset = data.getInt(position);
+        if (interfacesOffset == 0) {
+            return EMPTY_SHORT_ARRAY;
         }
+        position = interfacesOffset;
+        int size = data.getInt(position);
+        if (size <= 0) {
+            throw new AssertionError("Unexpected interfaces list size: " + size);
+        }
+        position += SizeOf.UINT;
+        short[] types = new short[size];
+        for (int i = 0; i < size; i++) {
+            types[i] = data.getShort(position);
+            position += SizeOf.USHORT;
+        }
+        return types;
     }
 
     public final class Section implements ByteInput, ByteOutput {
+        private final String name;
         private final ByteBuffer data;
         private final int initialPosition;
-        private final String name;
 
         private Section(String name, ByteBuffer data) {
             this.name = name;
@@ -132,34 +520,34 @@ public final class Dex {
         }
 
         public int getPosition() {
-            return this.data.position();
+            return data.position();
         }
 
         public int readInt() {
-            return this.data.getInt();
+            return data.getInt();
         }
 
         public short readShort() {
-            return this.data.getShort();
+            return data.getShort();
         }
 
         public int readUnsignedShort() {
-            return readShort() & 65535;
+            return readShort() & 0xffff;
         }
 
         public byte readByte() {
-            return this.data.get();
+            return data.get();
         }
 
         public byte[] readByteArray(int length) {
             byte[] result = new byte[length];
-            this.data.get(result);
+            data.get(result);
             return result;
         }
 
         public short[] readShortArray(int length) {
             if (length == 0) {
-                return Dex.EMPTY_SHORT_ARRAY;
+                return EMPTY_SHORT_ARRAY;
             }
             short[] result = new short[length];
             for (int i = 0; i < length; i++) {
@@ -185,110 +573,136 @@ public final class Dex {
         }
 
         public TypeList readTypeList() {
-            short[] types = readShortArray(readInt());
+            int size = readInt();
+            short[] types = readShortArray(size);
             alignToFourBytes();
             return new TypeList(Dex.this, types);
         }
 
         public String readString() {
             int offset = readInt();
-            int savedPosition = this.data.position();
-            int savedLimit = this.data.limit();
-            this.data.position(offset);
-            this.data.limit(this.data.capacity());
+            int savedPosition = data.position();
+            int savedLimit = data.limit();
+            data.position(offset);
+            data.limit(data.capacity());
             try {
                 int expectedLength = readUleb128();
                 String result = Mutf8.decode(this, new char[expectedLength]);
                 if (result.length() != expectedLength) {
-                    throw new DexException("Declared length " + expectedLength + " doesn't match decoded length of " + result.length());
+                    throw new DexException("Declared length " + expectedLength
+                            + " doesn't match decoded length of " + result.length());
                 }
-                this.data.position(savedPosition);
-                this.data.limit(savedLimit);
                 return result;
-            } catch (Throwable e) {
+            } catch (UTFDataFormatException e) {
                 throw new DexException(e);
-            } catch (Throwable th) {
-                this.data.position(savedPosition);
-                this.data.limit(savedLimit);
+            } finally {
+                data.position(savedPosition);
+                data.limit(savedLimit);
             }
         }
 
         public FieldId readFieldId() {
-            return new FieldId(Dex.this, readUnsignedShort(), readUnsignedShort(), readInt());
+            int declaringClassIndex = readUnsignedShort();
+            int typeIndex = readUnsignedShort();
+            int nameIndex = readInt();
+            return new FieldId(Dex.this, declaringClassIndex, typeIndex, nameIndex);
         }
 
         public MethodId readMethodId() {
-            return new MethodId(Dex.this, readUnsignedShort(), readUnsignedShort(), readInt());
+            int declaringClassIndex = readUnsignedShort();
+            int protoIndex = readUnsignedShort();
+            int nameIndex = readInt();
+            return new MethodId(Dex.this, declaringClassIndex, protoIndex, nameIndex);
         }
 
         public ProtoId readProtoId() {
-            return new ProtoId(Dex.this, readInt(), readInt(), readInt());
-        }
-
-        public CallSiteId readCallSiteId() {
-            return new CallSiteId(Dex.this, readInt());
-        }
-
-        public MethodHandle readMethodHandle() {
-            return new MethodHandle(Dex.this, MethodHandleType.fromValue(readUnsignedShort()), readUnsignedShort(), readUnsignedShort(), readUnsignedShort());
+            int shortyIndex = readInt();
+            int returnTypeIndex = readInt();
+            int parametersOffset = readInt();
+            return new ProtoId(Dex.this, shortyIndex, returnTypeIndex, parametersOffset);
         }
 
         public ClassDef readClassDef() {
-            return new ClassDef(Dex.this, getPosition(), readInt(), readInt(), readInt(), readInt(), readInt(), readInt(), readInt(), readInt());
+            int offset = getPosition();
+            int type = readInt();
+            int accessFlags = readInt();
+            int supertype = readInt();
+            int interfacesOffset = readInt();
+            int sourceFileIndex = readInt();
+            int annotationsOffset = readInt();
+            int classDataOffset = readInt();
+            int staticValuesOffset = readInt();
+            return new ClassDef(Dex.this, offset, type, accessFlags, supertype,
+                    interfacesOffset, sourceFileIndex, annotationsOffset, classDataOffset,
+                    staticValuesOffset);
         }
 
         private Code readCode() {
-            CatchHandler[] catchHandlers;
-            Try[] tries;
             int registersSize = readUnsignedShort();
             int insSize = readUnsignedShort();
             int outsSize = readUnsignedShort();
             int triesSize = readUnsignedShort();
             int debugInfoOffset = readInt();
-            short[] instructions = readShortArray(readInt());
+            int instructionsSize = readInt();
+            short[] instructions = readShortArray(instructionsSize);
+            Code.Try[] tries;
+            Code.CatchHandler[] catchHandlers;
             if (triesSize > 0) {
                 if (instructions.length % 2 == 1) {
-                    readShort();
+                    readShort(); // padding
                 }
-                Section triesSection = Dex.this.open(this.data.position());
-                skip(triesSize * 8);
+
+                /*
+                 * We can't read the tries until we've read the catch handlers.
+                 * Unfortunately they're in the opposite order in the dex file
+                 * so we need to read them out-of-order.
+                 */
+                Section triesSection = open(data.position());
+                skip(triesSize * SizeOf.TRY_ITEM);
                 catchHandlers = readCatchHandlers();
                 tries = triesSection.readTries(triesSize, catchHandlers);
             } else {
-                tries = new Try[0];
-                catchHandlers = new CatchHandler[0];
+                tries = new Code.Try[0];
+                catchHandlers = new Code.CatchHandler[0];
             }
-            return new Code(registersSize, insSize, outsSize, debugInfoOffset, instructions, tries, catchHandlers);
+            return new Code(registersSize, insSize, outsSize, debugInfoOffset, instructions,
+                            tries, catchHandlers);
         }
 
-        private CatchHandler[] readCatchHandlers() {
-            int baseOffset = this.data.position();
+        private Code.CatchHandler[] readCatchHandlers() {
+            int baseOffset = data.position();
             int catchHandlersSize = readUleb128();
-            CatchHandler[] result = new CatchHandler[catchHandlersSize];
+            Code.CatchHandler[] result = new Code.CatchHandler[catchHandlersSize];
             for (int i = 0; i < catchHandlersSize; i++) {
-                result[i] = readCatchHandler(this.data.position() - baseOffset);
+                int offset = data.position() - baseOffset;
+                result[i] = readCatchHandler(offset);
             }
             return result;
         }
 
-        private Try[] readTries(int triesSize, CatchHandler[] catchHandlers) {
-            Try[] result = new Try[triesSize];
+        private Code.Try[] readTries(int triesSize, Code.CatchHandler[] catchHandlers) {
+            Code.Try[] result = new Code.Try[triesSize];
             for (int i = 0; i < triesSize; i++) {
-                result[i] = new Try(readInt(), readUnsignedShort(), findCatchHandlerIndex(catchHandlers, readUnsignedShort()));
+                int startAddress = readInt();
+                int instructionCount = readUnsignedShort();
+                int handlerOffset = readUnsignedShort();
+                int catchHandlerIndex = findCatchHandlerIndex(catchHandlers, handlerOffset);
+                result[i] = new Code.Try(startAddress, instructionCount, catchHandlerIndex);
             }
             return result;
         }
 
-        private int findCatchHandlerIndex(CatchHandler[] catchHandlers, int offset) {
+        private int findCatchHandlerIndex(Code.CatchHandler[] catchHandlers, int offset) {
             for (int i = 0; i < catchHandlers.length; i++) {
-                if (catchHandlers[i].getOffset() == offset) {
+                Code.CatchHandler catchHandler = catchHandlers[i];
+                if (catchHandler.getOffset() == offset) {
                     return i;
                 }
             }
             throw new IllegalArgumentException();
         }
 
-        private CatchHandler readCatchHandler(int offset) {
+        private Code.CatchHandler readCatchHandler(int offset) {
             int size = readSleb128();
             int handlersCount = Math.abs(size);
             int[] typeIndexes = new int[handlersCount];
@@ -297,50 +711,67 @@ public final class Dex {
                 typeIndexes[i] = readUleb128();
                 addresses[i] = readUleb128();
             }
-            return new CatchHandler(typeIndexes, addresses, size <= 0 ? readUleb128() : -1, offset);
+            int catchAllAddress = size <= 0 ? readUleb128() : -1;
+            return new Code.CatchHandler(typeIndexes, addresses, catchAllAddress, offset);
         }
 
         private ClassData readClassData() {
-            return new ClassData(readFields(readUleb128()), readFields(readUleb128()), readMethods(readUleb128()), readMethods(readUleb128()));
+            int staticFieldsSize = readUleb128();
+            int instanceFieldsSize = readUleb128();
+            int directMethodsSize = readUleb128();
+            int virtualMethodsSize = readUleb128();
+            ClassData.Field[] staticFields = readFields(staticFieldsSize);
+            ClassData.Field[] instanceFields = readFields(instanceFieldsSize);
+            ClassData.Method[] directMethods = readMethods(directMethodsSize);
+            ClassData.Method[] virtualMethods = readMethods(virtualMethodsSize);
+            return new ClassData(staticFields, instanceFields, directMethods, virtualMethods);
         }
 
-        private Field[] readFields(int count) {
-            Field[] result = new Field[count];
+        private ClassData.Field[] readFields(int count) {
+            ClassData.Field[] result = new ClassData.Field[count];
             int fieldIndex = 0;
             for (int i = 0; i < count; i++) {
-                fieldIndex += readUleb128();
-                result[i] = new Field(fieldIndex, readUleb128());
+                fieldIndex += readUleb128(); // field index diff
+                int accessFlags = readUleb128();
+                result[i] = new ClassData.Field(fieldIndex, accessFlags);
             }
             return result;
         }
 
-        private Method[] readMethods(int count) {
-            Method[] result = new Method[count];
+        private ClassData.Method[] readMethods(int count) {
+            ClassData.Method[] result = new ClassData.Method[count];
             int methodIndex = 0;
             for (int i = 0; i < count; i++) {
-                methodIndex += readUleb128();
-                result[i] = new Method(methodIndex, readUleb128(), readUleb128());
+                methodIndex += readUleb128(); // method index diff
+                int accessFlags = readUleb128();
+                int codeOff = readUleb128();
+                result[i] = new ClassData.Method(methodIndex, accessFlags, codeOff);
             }
             return result;
         }
 
+        /**
+         * Returns a byte array containing the bytes from {@code start} to this
+         * section's current position.
+         */
         private byte[] getBytesFrom(int start) {
-            byte[] result = new byte[(this.data.position() - start)];
-            this.data.position(start);
-            this.data.get(result);
+            int end = data.position();
+            byte[] result = new byte[end - start];
+            data.position(start);
+            data.get(result);
             return result;
         }
 
         public Annotation readAnnotation() {
             byte visibility = readByte();
-            int start = this.data.position();
-            new EncodedValueReader((ByteInput) this, 29).skipValue();
+            int start = data.position();
+            new EncodedValueReader(this, EncodedValueReader.ENCODED_ANNOTATION).skipValue();
             return new Annotation(Dex.this, visibility, new EncodedValue(getBytesFrom(start)));
         }
 
         public EncodedValue readEncodedArray() {
-            int start = this.data.position();
-            new EncodedValueReader((ByteInput) this, 28).skipValue();
+            int start = data.position();
+            new EncodedValueReader(this, EncodedValueReader.ENCODED_ARRAY).skipValue();
             return new EncodedValue(getBytesFrom(start));
         }
 
@@ -348,21 +779,27 @@ public final class Dex {
             if (count < 0) {
                 throw new IllegalArgumentException();
             }
-            this.data.position(this.data.position() + count);
+            data.position(data.position() + count);
         }
 
+        /**
+         * Skips bytes until the position is aligned to a multiple of 4.
+         */
         public void alignToFourBytes() {
-            this.data.position((this.data.position() + 3) & -4);
+            data.position((data.position() + 3) & ~3);
         }
 
+        /**
+         * Writes 0x00 until the position is aligned to a multiple of 4.
+         */
         public void alignToFourBytesWithZeroFill() {
-            while ((this.data.position() & 3) != 0) {
-                this.data.put((byte) 0);
+            while ((data.position() & 3) != 0) {
+                data.put((byte) 0);
             }
         }
 
         public void assertFourByteAligned() {
-            if ((this.data.position() & 3) != 0) {
+            if ((data.position() & 3) != 0) {
                 throw new IllegalStateException("Not four byte aligned!");
             }
         }
@@ -372,16 +809,16 @@ public final class Dex {
         }
 
         public void writeByte(int b) {
-            this.data.put((byte) b);
+            data.put((byte) b);
         }
 
         public void writeShort(short i) {
-            this.data.putShort(i);
+            data.putShort(i);
         }
 
         public void writeUnsignedShort(int i) {
             short s = (short) i;
-            if (i != (65535 & s)) {
+            if (i != (s & 0xffff)) {
                 throw new IllegalArgumentException("Expected an unsigned short: " + i);
             }
             writeShort(s);
@@ -394,14 +831,14 @@ public final class Dex {
         }
 
         public void writeInt(int i) {
-            this.data.putInt(i);
+            data.putInt(i);
         }
 
         public void writeUleb128(int i) {
             try {
                 Leb128.writeUnsignedLeb128(this, i);
             } catch (ArrayIndexOutOfBoundsException e) {
-                throw new DexException("Section limit " + this.data.limit() + " exceeded by " + this.name);
+                throw new DexException("Section limit " + data.limit() + " exceeded by " + name);
             }
         }
 
@@ -409,13 +846,14 @@ public final class Dex {
             try {
                 Leb128.writeSignedLeb128(this, i);
             } catch (ArrayIndexOutOfBoundsException e) {
-                throw new DexException("Section limit " + this.data.limit() + " exceeded by " + this.name);
+                throw new DexException("Section limit " + data.limit() + " exceeded by " + name);
             }
         }
 
         public void writeStringData(String value) {
             try {
-                writeUleb128(value.length());
+                int length = value.length();
+                writeUleb128(length);
                 write(Mutf8.encode(value));
                 writeByte(0);
             } catch (UTFDataFormatException e) {
@@ -432,402 +870,112 @@ public final class Dex {
             alignToFourBytesWithZeroFill();
         }
 
+        /**
+         * Returns the number of bytes remaining in this section.
+         */
+        public int remaining() {
+            return data.remaining();
+        }
+
+        /**
+         * Returns the number of bytes used by this section.
+         */
         public int used() {
-            return this.data.position() - this.initialPosition;
+            return data.position() - initialPosition;
         }
     }
 
     private final class StringTable extends AbstractList<String> implements RandomAccess {
-        private StringTable() {
+        @Override public String get(int index) {
+            checkBounds(index, tableOfContents.stringIds.size);
+            return open(tableOfContents.stringIds.off + (index * SizeOf.STRING_ID_ITEM))
+                    .readString();
         }
-
-        public String get(int index) {
-            Dex.checkBounds(index, Dex.this.tableOfContents.stringIds.size);
-            return Dex.this.open(Dex.this.tableOfContents.stringIds.off + (index * 4)).readString();
-        }
-
-        public int size() {
-            return Dex.this.tableOfContents.stringIds.size;
+        @Override public int size() {
+            return tableOfContents.stringIds.size;
         }
     }
 
-    private final class TypeIndexToDescriptorIndexTable extends AbstractList<Integer> implements RandomAccess {
-        private TypeIndexToDescriptorIndexTable() {
+    private final class TypeIndexToDescriptorIndexTable extends AbstractList<Integer>
+            implements RandomAccess {
+        @Override public Integer get(int index) {
+            return descriptorIndexFromTypeIndex(index);
         }
-
-        public Integer get(int index) {
-            return Integer.valueOf(Dex.this.descriptorIndexFromTypeIndex(index));
-        }
-
-        public int size() {
-            return Dex.this.tableOfContents.typeIds.size;
+        @Override public int size() {
+            return tableOfContents.typeIds.size;
         }
     }
 
-    private final class TypeIndexToDescriptorTable extends AbstractList<String> implements RandomAccess {
-        private TypeIndexToDescriptorTable() {
+    private final class TypeIndexToDescriptorTable extends AbstractList<String>
+            implements RandomAccess {
+        @Override public String get(int index) {
+            return strings.get(descriptorIndexFromTypeIndex(index));
         }
-
-        public String get(int index) {
-            return Dex.this.strings.get(Dex.this.descriptorIndexFromTypeIndex(index));
-        }
-
-        public int size() {
-            return Dex.this.tableOfContents.typeIds.size;
+        @Override public int size() {
+            return tableOfContents.typeIds.size;
         }
     }
 
-    public Dex(byte[] data) throws IOException {
-        this(ByteBuffer.wrap(data));
-    }
-
-    private Dex(ByteBuffer data) throws IOException {
-        this.tableOfContents = new TableOfContents();
-        this.nextSectionStart = 0;
-        this.strings = new StringTable();
-        this.typeIds = new TypeIndexToDescriptorIndexTable();
-        this.typeNames = new TypeIndexToDescriptorTable();
-        this.protoIds = new ProtoIdTable();
-        this.fieldIds = new FieldIdTable();
-        this.methodIds = new MethodIdTable();
-        this.data = data;
-        this.data.order(ByteOrder.LITTLE_ENDIAN);
-        this.tableOfContents.readFrom(this);
-    }
-
-    public Dex(int byteCount) throws IOException {
-        this.tableOfContents = new TableOfContents();
-        this.nextSectionStart = 0;
-        this.strings = new StringTable();
-        this.typeIds = new TypeIndexToDescriptorIndexTable();
-        this.typeNames = new TypeIndexToDescriptorTable();
-        this.protoIds = new ProtoIdTable();
-        this.fieldIds = new FieldIdTable();
-        this.methodIds = new MethodIdTable();
-        this.data = ByteBuffer.wrap(new byte[byteCount]);
-        this.data.order(ByteOrder.LITTLE_ENDIAN);
-    }
-
-    public Dex(InputStream in) throws IOException {
-        this.tableOfContents = new TableOfContents();
-        this.nextSectionStart = 0;
-        this.strings = new StringTable();
-        this.typeIds = new TypeIndexToDescriptorIndexTable();
-        this.typeNames = new TypeIndexToDescriptorTable();
-        this.protoIds = new ProtoIdTable();
-        this.fieldIds = new FieldIdTable();
-        this.methodIds = new MethodIdTable();
-        try {
-            loadFrom(in);
-        } finally {
-            in.close();
+    private final class ProtoIdTable extends AbstractList<ProtoId> implements RandomAccess {
+        @Override public ProtoId get(int index) {
+            checkBounds(index, tableOfContents.protoIds.size);
+            return open(tableOfContents.protoIds.off + (SizeOf.PROTO_ID_ITEM * index))
+                    .readProtoId();
+        }
+        @Override public int size() {
+            return tableOfContents.protoIds.size;
         }
     }
 
-    /* JADX WARNING: inconsistent code. */
-    /* Code decompiled incorrectly, please refer to instructions dump. */
-    public Dex(java.io.File r7) throws IOException {
-        /*
-        r6 = this;
-        r4 = 0;
-        r6.<init>();
-        r3 = new com.android.dex.TableOfContents;
-        r3.<init>();
-        r6.tableOfContents = r3;
-        r3 = 0;
-        r6.nextSectionStart = r3;
-        r3 = new com.android.dex.Dex$StringTable;
-        r3.<init>();
-        r6.strings = r3;
-        r3 = new com.android.dex.Dex$TypeIndexToDescriptorIndexTable;
-        r3.<init>();
-        r6.typeIds = r3;
-        r3 = new com.android.dex.Dex$TypeIndexToDescriptorTable;
-        r3.<init>();
-        r6.typeNames = r3;
-        r3 = new com.android.dex.Dex$ProtoIdTable;
-        r3.<init>();
-        r6.protoIds = r3;
-        r3 = new com.android.dex.Dex$FieldIdTable;
-        r3.<init>();
-        r6.fieldIds = r3;
-        r3 = new com.android.dex.Dex$MethodIdTable;
-        r3.<init>();
-        r6.methodIds = r3;
-        r3 = r7.getName();
-        r3 = com.android.dex.util.FileUtils.hasArchiveSuffix(r3);
-        if (r3 == 0) goto L_0x0081;
-    L_0x0042:
-        r2 = new java.util.zip.ZipFile;
-        r2.<init>(r7);
-        r3 = "classes.dex";
-        r0 = r2.getEntry(r3);
-        if (r0 == 0) goto L_0x0068;
-    L_0x004f:
-        r1 = r2.getInputStream(r0);
-        r6.loadFrom(r1);	 Catch:{ Throwable -> 0x005f }
-        if (r1 == 0) goto L_0x005b;
-    L_0x0058:
-        $closeResource(r4, r1);
-    L_0x005b:
-        r2.close();
-    L_0x005e:
-        return;
-    L_0x005f:
-        r4 = move-exception;
-        throw r4;	 Catch:{ all -> 0x0061 }
-    L_0x0061:
-        r3 = move-exception;
-        if (r1 == 0) goto L_0x0067;
-    L_0x0064:
-        $closeResource(r4, r1);
-    L_0x0067:
-        throw r3;
-    L_0x0068:
-        r3 = new com.android.dex.DexException;
-        r4 = new java.lang.StringBuilder;
-        r4.<init>();
-        r5 = "Expected classes.dex in ";
-        r4 = r4.append(r5);
-        r4 = r4.append(r7);
-        r4 = r4.toString();
-        r3.<init>(r4);
-        throw r3;
-    L_0x0081:
-        r3 = r7.getName();
-        r5 = ".dex";
-        r3 = r3.endsWith(r5);
-        if (r3 == 0) goto L_0x00a0;
-    L_0x008d:
-        r1 = new java.io.FileInputStream;
-        r1.<init>(r7);
-        r6.loadFrom(r1);	 Catch:{ Throwable -> 0x0099 }
-        $closeResource(r4, r1);
-        goto L_0x005e;
-    L_0x0099:
-        r4 = move-exception;
-        throw r4;	 Catch:{ all -> 0x009b }
-    L_0x009b:
-        r3 = move-exception;
-        $closeResource(r4, r1);
-        throw r3;
-    L_0x00a0:
-        r3 = new com.android.dex.DexException;
-        r4 = new java.lang.StringBuilder;
-        r4.<init>();
-        r5 = "unknown output extension: ";
-        r4 = r4.append(r5);
-        r4 = r4.append(r7);
-        r4 = r4.toString();
-        r3.<init>(r4);
-        throw r3;
-        */
-        throw new UnsupportedOperationException("Method not decompiled: com.android.dex.Dex.<init>(java.io.File):void");
+    private final class FieldIdTable extends AbstractList<FieldId> implements RandomAccess {
+        @Override public FieldId get(int index) {
+            checkBounds(index, tableOfContents.fieldIds.size);
+            return open(tableOfContents.fieldIds.off + (SizeOf.MEMBER_ID_ITEM * index))
+                    .readFieldId();
+        }
+        @Override public int size() {
+            return tableOfContents.fieldIds.size;
+        }
     }
 
-    private static /* synthetic */ void $closeResource(Throwable x0, AutoCloseable x1) {
-        if (x0 != null) {
-            try {
-                x1.close();
-                return;
-            } catch (Throwable th) {
-                x0.addSuppressed(th);
-                return;
+    private final class MethodIdTable extends AbstractList<MethodId> implements RandomAccess {
+        @Override public MethodId get(int index) {
+            checkBounds(index, tableOfContents.methodIds.size);
+            return open(tableOfContents.methodIds.off + (SizeOf.MEMBER_ID_ITEM * index))
+                    .readMethodId();
+        }
+        @Override public int size() {
+            return tableOfContents.methodIds.size;
+        }
+    }
+
+    private final class ClassDefIterator implements Iterator<ClassDef> {
+        private final Section in = open(tableOfContents.classDefs.off);
+        private int count = 0;
+
+        @Override
+        public boolean hasNext() {
+            return count < tableOfContents.classDefs.size;
+        }
+        @Override
+        public ClassDef next() {
+            if (!hasNext()) {
+                throw new NoSuchElementException();
             }
+            count++;
+            return in.readClassDef();
         }
-        x1.close();
-    }
-
-    private void loadFrom(InputStream in) throws IOException {
-        ByteArrayOutputStream bytesOut = new ByteArrayOutputStream();
-        byte[] buffer = new byte[8192];
-        while (true) {
-            int count = in.read(buffer);
-            if (count != -1) {
-                bytesOut.write(buffer, 0, count);
-            } else {
-                this.data = ByteBuffer.wrap(bytesOut.toByteArray());
-                this.data.order(ByteOrder.LITTLE_ENDIAN);
-                this.tableOfContents.readFrom(this);
-                return;
-            }
+        @Override
+            public void remove() {
+            throw new UnsupportedOperationException();
         }
     }
 
-    private static void checkBounds(int index, int length) {
-        if (index < 0 || index >= length) {
-            throw new IndexOutOfBoundsException("index:" + index + ", length=" + length);
+    private final class ClassDefIterable implements Iterable<ClassDef> {
+        public Iterator<ClassDef> iterator() {
+            return !tableOfContents.classDefs.exists()
+               ? Collections.<ClassDef>emptySet().iterator()
+               : new ClassDefIterator();
         }
-    }
-
-    public void writeTo(OutputStream out) throws IOException {
-        byte[] buffer = new byte[8192];
-        ByteBuffer data = this.data.duplicate();
-        data.clear();
-        while (data.hasRemaining()) {
-            int count = Math.min(buffer.length, data.remaining());
-            data.get(buffer, 0, count);
-            out.write(buffer, 0, count);
-        }
-    }
-
-    /* JADX WARNING: inconsistent code. */
-    /* Code decompiled incorrectly, please refer to instructions dump. */
-    public void writeTo(java.io.File r4) throws IOException {
-        /*
-        r3 = this;
-        r0 = new java.io.FileOutputStream;
-        r0.<init>(r4);
-        r2 = 0;
-        r3.writeTo(r0);	 Catch:{ Throwable -> 0x000d }
-        $closeResource(r2, r0);
-        return;
-    L_0x000d:
-        r2 = move-exception;
-        throw r2;	 Catch:{ all -> 0x000f }
-    L_0x000f:
-        r1 = move-exception;
-        $closeResource(r2, r0);
-        throw r1;
-        */
-        throw new UnsupportedOperationException("Method not decompiled: com.android.dex.Dex.writeTo(java.io.File):void");
-    }
-
-    public TableOfContents getTableOfContents() {
-        return this.tableOfContents;
-    }
-
-    public Section open(int position) {
-        if (position < 0 || position >= this.data.capacity()) {
-            throw new IllegalArgumentException("position=" + position + " length=" + this.data.capacity());
-        }
-        ByteBuffer sectionData = this.data.duplicate();
-        sectionData.order(ByteOrder.LITTLE_ENDIAN);
-        sectionData.position(position);
-        sectionData.limit(this.data.capacity());
-        return new Section("section", sectionData);
-    }
-
-    public Section appendSection(int maxByteCount, String name) {
-        if ((maxByteCount & 3) != 0) {
-            throw new IllegalStateException("Not four byte aligned!");
-        }
-        int limit = this.nextSectionStart + maxByteCount;
-        ByteBuffer sectionData = this.data.duplicate();
-        sectionData.order(ByteOrder.LITTLE_ENDIAN);
-        sectionData.position(this.nextSectionStart);
-        sectionData.limit(limit);
-        Section result = new Section(name, sectionData);
-        this.nextSectionStart = limit;
-        return result;
-    }
-
-    public int getLength() {
-        return this.data.capacity();
-    }
-
-    public int getNextSectionStart() {
-        return this.nextSectionStart;
-    }
-
-    public byte[] getBytes() {
-        ByteBuffer data = this.data.duplicate();
-        byte[] result = new byte[data.capacity()];
-        data.position(0);
-        data.get(result);
-        return result;
-    }
-
-    public List<String> strings() {
-        return this.strings;
-    }
-
-    public List<Integer> typeIds() {
-        return this.typeIds;
-    }
-
-    public List<String> typeNames() {
-        return this.typeNames;
-    }
-
-    public List<ProtoId> protoIds() {
-        return this.protoIds;
-    }
-
-    public List<FieldId> fieldIds() {
-        return this.fieldIds;
-    }
-
-    public List<MethodId> methodIds() {
-        return this.methodIds;
-    }
-
-    public Iterable<ClassDef> classDefs() {
-        return new ClassDefIterable();
-    }
-
-    public TypeList readTypeList(int offset) {
-        if (offset == 0) {
-            return TypeList.EMPTY;
-        }
-        return open(offset).readTypeList();
-    }
-
-    public ClassData readClassData(ClassDef classDef) {
-        int offset = classDef.getClassDataOffset();
-        if (offset != 0) {
-            return open(offset).readClassData();
-        }
-        throw new IllegalArgumentException("offset == 0");
-    }
-
-    public Code readCode(Method method) {
-        int offset = method.getCodeOffset();
-        if (offset != 0) {
-            return open(offset).readCode();
-        }
-        throw new IllegalArgumentException("offset == 0");
-    }
-
-    public byte[] computeSignature() throws IOException {
-        try {
-            MessageDigest digest = MessageDigest.getInstance("SHA-1");
-            byte[] buffer = new byte[8192];
-            ByteBuffer data = this.data.duplicate();
-            data.limit(data.capacity());
-            data.position(32);
-            while (data.hasRemaining()) {
-                int count = Math.min(buffer.length, data.remaining());
-                data.get(buffer, 0, count);
-                digest.update(buffer, 0, count);
-            }
-            return digest.digest();
-        } catch (NoSuchAlgorithmException e) {
-            throw new AssertionError();
-        }
-    }
-
-    public int computeChecksum() throws IOException {
-        Adler32 adler32 = new Adler32();
-        byte[] buffer = new byte[8192];
-        ByteBuffer data = this.data.duplicate();
-        data.limit(data.capacity());
-        data.position(12);
-        while (data.hasRemaining()) {
-            int count = Math.min(buffer.length, data.remaining());
-            data.get(buffer, 0, count);
-            adler32.update(buffer, 0, count);
-        }
-        return (int) adler32.getValue();
-    }
-
-    public void writeHashes() throws IOException {
-        open(12).write(computeSignature());
-        open(8).writeInt(computeChecksum());
-    }
-
-    public int descriptorIndexFromTypeIndex(int typeIndex) {
-        checkBounds(typeIndex, this.tableOfContents.typeIds.size);
-        return this.data.getInt(this.tableOfContents.typeIds.off + (typeIndex * 4));
     }
 }

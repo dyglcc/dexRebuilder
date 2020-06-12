@@ -1,13 +1,28 @@
+/*
+ * Copyright (C) 2011 The Android Open Source Project
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
 package com.android.dex;
 
-import com.android.dex.Dex.Section;
 import com.android.dex.util.Unsigned;
 
 public final class ProtoId implements Comparable<ProtoId> {
     private final Dex dex;
-    private final int parametersOffset;
-    private final int returnTypeIndex;
     private final int shortyIndex;
+    private final int returnTypeIndex;
+    private final int parametersOffset;
 
     public ProtoId(Dex dex, int shortyIndex, int returnTypeIndex, int parametersOffset) {
         this.dex = dex;
@@ -17,34 +32,37 @@ public final class ProtoId implements Comparable<ProtoId> {
     }
 
     public int compareTo(ProtoId other) {
-        if (this.returnTypeIndex != other.returnTypeIndex) {
-            return Unsigned.compare(this.returnTypeIndex, other.returnTypeIndex);
+        if (returnTypeIndex != other.returnTypeIndex) {
+            return Unsigned.compare(returnTypeIndex, other.returnTypeIndex);
         }
-        return Unsigned.compare(this.parametersOffset, other.parametersOffset);
+        return Unsigned.compare(parametersOffset, other.parametersOffset);
     }
 
     public int getShortyIndex() {
-        return this.shortyIndex;
+        return shortyIndex;
     }
 
     public int getReturnTypeIndex() {
-        return this.returnTypeIndex;
+        return returnTypeIndex;
     }
 
     public int getParametersOffset() {
-        return this.parametersOffset;
+        return parametersOffset;
     }
 
-    public void writeTo(Section out) {
-        out.writeInt(this.shortyIndex);
-        out.writeInt(this.returnTypeIndex);
-        out.writeInt(this.parametersOffset);
+    public void writeTo(Dex.Section out) {
+        out.writeInt(shortyIndex);
+        out.writeInt(returnTypeIndex);
+        out.writeInt(parametersOffset);
     }
 
-    public String toString() {
-        if (this.dex == null) {
-            return this.shortyIndex + " " + this.returnTypeIndex + " " + this.parametersOffset;
+    @Override public String toString() {
+        if (dex == null) {
+            return shortyIndex + " " + returnTypeIndex + " " + parametersOffset;
         }
-        return ((String) this.dex.strings().get(this.shortyIndex)) + ": " + ((String) this.dex.typeNames().get(this.returnTypeIndex)) + " " + this.dex.readTypeList(this.parametersOffset);
+
+        return dex.strings().get(shortyIndex)
+                + ": " + dex.typeNames().get(returnTypeIndex)
+                + " " + dex.readTypeList(parametersOffset);
     }
 }

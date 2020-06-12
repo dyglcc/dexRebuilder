@@ -1,10 +1,27 @@
+/*
+ * Copyright (C) 2011 The Android Open Source Project
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
 package com.android.dex;
 
 import com.android.dex.util.Unsigned;
-import java.io.Serializable;
 
 public final class TypeList implements Comparable<TypeList> {
+
     public static final TypeList EMPTY = new TypeList(null, Dex.EMPTY_SHORT_ARRAY);
+
     private final Dex dex;
     private final short[] types;
 
@@ -14,26 +31,23 @@ public final class TypeList implements Comparable<TypeList> {
     }
 
     public short[] getTypes() {
-        return this.types;
+        return types;
     }
 
-    public int compareTo(TypeList other) {
-        int i = 0;
-        while (i < this.types.length && i < other.types.length) {
-            if (this.types[i] != other.types[i]) {
-                return Unsigned.compare(this.types[i], other.types[i]);
+    @Override public int compareTo(TypeList other) {
+        for (int i = 0; i < types.length && i < other.types.length; i++) {
+            if (types[i] != other.types[i]) {
+                return Unsigned.compare(types[i], other.types[i]);
             }
-            i++;
         }
-        return Unsigned.compare(this.types.length, other.types.length);
+        return Unsigned.compare(types.length, other.types.length);
     }
 
-    public String toString() {
+    @Override public String toString() {
         StringBuilder result = new StringBuilder();
         result.append("(");
-        int typesLength = this.types.length;
-        for (int i = 0; i < typesLength; i++) {
-            result.append(this.dex != null ? (Serializable) this.dex.typeNames().get(this.types[i]) : Short.valueOf(this.types[i]));
+        for (int i = 0, typesLength = types.length; i < typesLength; i++) {
+            result.append(dex != null ? dex.typeNames().get(types[i]) : types[i]);
         }
         result.append(")");
         return result.toString();

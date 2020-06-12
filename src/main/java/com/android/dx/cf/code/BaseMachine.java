@@ -1,302 +1,580 @@
+/*
+ * Copyright (C) 2007 The Android Open Source Project
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
 package com.android.dx.cf.code;
 
-import com.android.dx.rop.code.LocalItem;
-import com.android.dx.rop.code.RegisterSpec;
 import com.android.dx.rop.cst.Constant;
 import com.android.dx.rop.type.Prototype;
 import com.android.dx.rop.type.StdTypeList;
 import com.android.dx.rop.type.Type;
 import com.android.dx.rop.type.TypeBearer;
+import com.android.dx.rop.code.LocalItem;
+import com.android.dx.rop.code.RegisterSpec;
+
 import java.util.ArrayList;
 
+/**
+ * Base implementation of {@link Machine}.
+ *
+ * <p><b>Note:</b> For the most part, the documentation for this class
+ * ignores the distinction between {@link Type} and {@link
+ * TypeBearer}.</p>
+ */
 public abstract class BaseMachine implements Machine {
-    private int argCount;
-    private TypeBearer[] args;
-    private SwitchList auxCases;
-    private Constant auxCst;
-    private ArrayList<Constant> auxInitValues;
-    private int auxInt;
-    private int auxTarget;
-    private Type auxType;
-    private int localIndex;
-    private boolean localInfo;
-    private RegisterSpec localTarget;
+    /* {@code non-null;} the prototype for the associated method */
     private final Prototype prototype;
-    private int resultCount;
+
+    /** {@code non-null;} primary arguments */
+    private TypeBearer[] args;
+
+    /** {@code >= 0;} number of primary arguments */
+    private int argCount;
+
+    /** {@code null-ok;} type of the operation, if salient */
+    private Type auxType;
+
+    /** auxiliary {@code int} argument */
+    private int auxInt;
+
+    /** {@code null-ok;} auxiliary constant argument */
+    private Constant auxCst;
+
+    /** auxiliary branch target argument */
+    private int auxTarget;
+
+    /** {@code null-ok;} auxiliary switch cases argument */
+    private SwitchList auxCases;
+
+    /** {@code null-ok;} auxiliary initial value list for newarray */
+    private ArrayList<Constant> auxInitValues;
+
+    /** {@code >= -1;} last local accessed */
+    private int localIndex;
+
+    /** specifies if local has info in the local variable table */
+    private boolean localInfo;
+
+    /** {@code null-ok;} local target spec, if salient and calculated */
+    private RegisterSpec localTarget;
+
+    /** {@code non-null;} results */
     private TypeBearer[] results;
 
+    /**
+     * {@code >= -1;} count of the results, or {@code -1} if no results
+     * have been set
+     */
+    private int resultCount;
+
+    /**
+     * Constructs an instance.
+     *
+     * @param prototype {@code non-null;} the prototype for the
+     * associated method
+     */
     public BaseMachine(Prototype prototype) {
         if (prototype == null) {
             throw new NullPointerException("prototype == null");
         }
+
         this.prototype = prototype;
-        this.args = new TypeBearer[10];
-        this.results = new TypeBearer[6];
+        args = new TypeBearer[10];
+        results = new TypeBearer[6];
         clearArgs();
     }
 
+    /** {@inheritDoc} */
     public Prototype getPrototype() {
-        return this.prototype;
+        return prototype;
     }
 
+    /** {@inheritDoc} */
     public final void clearArgs() {
-        this.argCount = 0;
-        this.auxType = null;
-        this.auxInt = 0;
-        this.auxCst = null;
-        this.auxTarget = 0;
-        this.auxCases = null;
-        this.auxInitValues = null;
-        this.localIndex = -1;
-        this.localInfo = false;
-        this.localTarget = null;
-        this.resultCount = -1;
+        argCount = 0;
+        auxType = null;
+        auxInt = 0;
+        auxCst = null;
+        auxTarget = 0;
+        auxCases = null;
+        auxInitValues = null;
+        localIndex = -1;
+        localInfo = false;
+        localTarget = null;
+        resultCount = -1;
     }
 
+    /** {@inheritDoc} */
     public final void popArgs(Frame frame, int count) {
         ExecutionStack stack = frame.getStack();
+
         clearArgs();
-        if (count > this.args.length) {
-            this.args = new TypeBearer[(count + 10)];
+
+        if (count > args.length) {
+            // Grow args, and add a little extra room to grow even more.
+            args = new TypeBearer[count + 10];
         }
+
         for (int i = count - 1; i >= 0; i--) {
-            this.args[i] = stack.pop();
+            args[i] = stack.pop();
         }
-        this.argCount = count;
+
+        argCount = count;
     }
 
+    /** {@inheritDoc} */
     public void popArgs(Frame frame, Prototype prototype) {
         StdTypeList types = prototype.getParameterTypes();
         int size = types.size();
+
+        // Use the above method to do the actual popping...
         popArgs(frame, size);
-        int i = 0;
-        while (i < size) {
-            if (Merger.isPossiblyAssignableFrom(types.getType(i), this.args[i])) {
-                i++;
-            } else {
-                throw new SimException("at stack depth " + ((size - 1) - i) + ", expected type " + types.getType(i).toHuman() + " but found " + this.args[i].getType().toHuman());
+
+        // ...and then verify the popped types.
+
+        for (int i = 0; i < size; i++) {
+            if (! Merger.isPossiblyAssignableFrom(types.getType(i), args[i])) {
+                throw new SimException("at stack depth " + (size - 1 - i) +
+                        ", expected type " + types.getType(i).toHuman() +
+                        " but found " + args[i].getType().toHuman());
             }
         }
     }
 
     public final void popArgs(Frame frame, Type type) {
+        // Use the above method to do the actual popping...
         popArgs(frame, 1);
-        if (!Merger.isPossiblyAssignableFrom(type, this.args[0])) {
-            throw new SimException("expected type " + type.toHuman() + " but found " + this.args[0].getType().toHuman());
+
+        // ...and then verify the popped type.
+        if (! Merger.isPossiblyAssignableFrom(type, args[0])) {
+            throw new SimException("expected type " + type.toHuman() +
+                    " but found " + args[0].getType().toHuman());
         }
     }
 
+    /** {@inheritDoc} */
     public final void popArgs(Frame frame, Type type1, Type type2) {
+        // Use the above method to do the actual popping...
         popArgs(frame, 2);
-        if (!Merger.isPossiblyAssignableFrom(type1, this.args[0])) {
-            throw new SimException("expected type " + type1.toHuman() + " but found " + this.args[0].getType().toHuman());
-        } else if (!Merger.isPossiblyAssignableFrom(type2, this.args[1])) {
-            throw new SimException("expected type " + type2.toHuman() + " but found " + this.args[1].getType().toHuman());
+
+        // ...and then verify the popped types.
+
+        if (! Merger.isPossiblyAssignableFrom(type1, args[0])) {
+            throw new SimException("expected type " + type1.toHuman() +
+                    " but found " + args[0].getType().toHuman());
+        }
+
+        if (! Merger.isPossiblyAssignableFrom(type2, args[1])) {
+            throw new SimException("expected type " + type2.toHuman() +
+                    " but found " + args[1].getType().toHuman());
         }
     }
 
-    public final void popArgs(Frame frame, Type type1, Type type2, Type type3) {
+    /** {@inheritDoc} */
+    public final void popArgs(Frame frame, Type type1, Type type2,
+            Type type3) {
+        // Use the above method to do the actual popping...
         popArgs(frame, 3);
-        if (!Merger.isPossiblyAssignableFrom(type1, this.args[0])) {
-            throw new SimException("expected type " + type1.toHuman() + " but found " + this.args[0].getType().toHuman());
-        } else if (!Merger.isPossiblyAssignableFrom(type2, this.args[1])) {
-            throw new SimException("expected type " + type2.toHuman() + " but found " + this.args[1].getType().toHuman());
-        } else if (!Merger.isPossiblyAssignableFrom(type3, this.args[2])) {
-            throw new SimException("expected type " + type3.toHuman() + " but found " + this.args[2].getType().toHuman());
+
+        // ...and then verify the popped types.
+
+        if (! Merger.isPossiblyAssignableFrom(type1, args[0])) {
+            throw new SimException("expected type " + type1.toHuman() +
+                    " but found " + args[0].getType().toHuman());
+        }
+
+        if (! Merger.isPossiblyAssignableFrom(type2, args[1])) {
+            throw new SimException("expected type " + type2.toHuman() +
+                    " but found " + args[1].getType().toHuman());
+        }
+
+        if (! Merger.isPossiblyAssignableFrom(type3, args[2])) {
+            throw new SimException("expected type " + type3.toHuman() +
+                    " but found " + args[2].getType().toHuman());
         }
     }
 
+    /** {@inheritDoc} */
     public final void localArg(Frame frame, int idx) {
         clearArgs();
-        this.args[0] = frame.getLocals().get(idx);
-        this.argCount = 1;
-        this.localIndex = idx;
+        args[0] = frame.getLocals().get(idx);
+        argCount = 1;
+        localIndex = idx;
     }
 
+    /** {@inheritDoc} */
     public final void localInfo(boolean local) {
-        this.localInfo = local;
+        localInfo = local;
     }
 
+    /** {@inheritDoc} */
     public final void auxType(Type type) {
-        this.auxType = type;
+        auxType = type;
     }
 
+    /** {@inheritDoc} */
     public final void auxIntArg(int value) {
-        this.auxInt = value;
+        auxInt = value;
     }
 
+    /** {@inheritDoc} */
     public final void auxCstArg(Constant cst) {
         if (cst == null) {
             throw new NullPointerException("cst == null");
         }
-        this.auxCst = cst;
+
+        auxCst = cst;
     }
 
+    /** {@inheritDoc} */
     public final void auxTargetArg(int target) {
-        this.auxTarget = target;
+        auxTarget = target;
     }
 
+    /** {@inheritDoc} */
     public final void auxSwitchArg(SwitchList cases) {
         if (cases == null) {
             throw new NullPointerException("cases == null");
         }
-        this.auxCases = cases;
+
+        auxCases = cases;
     }
 
+    /** {@inheritDoc} */
     public final void auxInitValues(ArrayList<Constant> initValues) {
-        this.auxInitValues = initValues;
+        auxInitValues = initValues;
     }
 
+    /** {@inheritDoc} */
     public final void localTarget(int idx, Type type, LocalItem local) {
-        this.localTarget = RegisterSpec.makeLocalOptional(idx, type, local);
+        localTarget = RegisterSpec.makeLocalOptional(idx, type, local);
     }
 
+    /**
+     * Gets the number of primary arguments.
+     *
+     * @return {@code >= 0;} the number of primary arguments
+     */
     protected final int argCount() {
-        return this.argCount;
+        return argCount;
     }
 
+    /**
+     * Gets the width of the arguments (where a category-2 value counts as
+     * two).
+     *
+     * @return {@code >= 0;} the argument width
+     */
     protected final int argWidth() {
         int result = 0;
-        for (int i = 0; i < this.argCount; i++) {
-            result += this.args[i].getType().getCategory();
+
+        for (int i = 0; i < argCount; i++) {
+            result += args[i].getType().getCategory();
         }
+
         return result;
     }
 
+    /**
+     * Gets the {@code n}th primary argument.
+     *
+     * @param n {@code >= 0, < argCount();} which argument
+     * @return {@code non-null;} the indicated argument
+     */
     protected final TypeBearer arg(int n) {
-        if (n >= this.argCount) {
+        if (n >= argCount) {
             throw new IllegalArgumentException("n >= argCount");
         }
+
         try {
-            return this.args[n];
-        } catch (ArrayIndexOutOfBoundsException e) {
+            return args[n];
+        } catch (ArrayIndexOutOfBoundsException ex) {
+            // Translate the exception.
             throw new IllegalArgumentException("n < 0");
         }
     }
 
+    /**
+     * Gets the type auxiliary argument.
+     *
+     * @return {@code null-ok;} the salient type
+     */
     protected final Type getAuxType() {
-        return this.auxType;
+        return auxType;
     }
 
+    /**
+     * Gets the {@code int} auxiliary argument.
+     *
+     * @return the argument value
+     */
     protected final int getAuxInt() {
-        return this.auxInt;
+        return auxInt;
     }
 
+    /**
+     * Gets the constant auxiliary argument.
+     *
+     * @return {@code null-ok;} the argument value
+     */
     protected final Constant getAuxCst() {
-        return this.auxCst;
+        return auxCst;
     }
 
+    /**
+     * Gets the branch target auxiliary argument.
+     *
+     * @return the argument value
+     */
     protected final int getAuxTarget() {
-        return this.auxTarget;
+        return auxTarget;
     }
 
+    /**
+     * Gets the switch cases auxiliary argument.
+     *
+     * @return {@code null-ok;} the argument value
+     */
     protected final SwitchList getAuxCases() {
-        return this.auxCases;
+        return auxCases;
     }
 
+    /**
+     * Gets the init values auxiliary argument.
+     *
+     * @return {@code null-ok;} the argument value
+     */
     protected final ArrayList<Constant> getInitValues() {
-        return this.auxInitValues;
+        return auxInitValues;
     }
-
+    /**
+     * Gets the last local index accessed.
+     *
+     * @return {@code >= -1;} the salient local index or {@code -1} if none
+     * was set since the last time {@link #clearArgs} was called
+     */
     protected final int getLocalIndex() {
-        return this.localIndex;
+        return localIndex;
     }
 
+    /**
+     * Gets whether the loaded local has info in the local variable table.
+     *
+     * @return {@code true} if local arg has info in the local variable table
+     */
     protected final boolean getLocalInfo() {
-        return this.localInfo;
+        return localInfo;
     }
 
+    /**
+     * Gets the target local register spec of the current operation, if any.
+     * The local target spec is the combination of the values indicated
+     * by a previous call to {@link #localTarget} with the type of what
+     * should be the sole result set by a call to {@link #setResult} (or
+     * the combination {@link #clearResult} then {@link #addResult}.
+     *
+     * @param isMove {@code true} if the operation being performed on the
+     * local is a move. This will cause constant values to be propagated
+     * to the returned local
+     * @return {@code null-ok;} the salient register spec or {@code null} if no
+     * local target was set since the last time {@link #clearArgs} was
+     * called
+     */
     protected final RegisterSpec getLocalTarget(boolean isMove) {
-        if (this.localTarget == null) {
+        if (localTarget == null) {
             return null;
         }
-        if (this.resultCount != 1) {
-            throw new SimException("local target with " + (this.resultCount == 0 ? "no" : "multiple") + " results");
+
+        if (resultCount != 1) {
+            throw new SimException("local target with " +
+                    ((resultCount == 0) ? "no" : "multiple") + " results");
         }
-        TypeBearer result = this.results[0];
+
+        TypeBearer result = results[0];
         Type resultType = result.getType();
-        Type localType = this.localTarget.getType();
+        Type localType = localTarget.getType();
+
         if (resultType == localType) {
+            /*
+             * If this is to be a move operation and the result is a
+             * known value, make the returned localTarget embody that
+             * value.
+             */
             if (isMove) {
-                return this.localTarget.withType(result);
+                return localTarget.withType(result);
+            } else {
+                return localTarget;
             }
-            return this.localTarget;
-        } else if (Merger.isPossiblyAssignableFrom(localType, resultType)) {
-            if (localType == Type.OBJECT) {
-                this.localTarget = this.localTarget.withType(result);
-            }
-            return this.localTarget;
-        } else {
+        }
+
+        if (! Merger.isPossiblyAssignableFrom(localType, resultType)) {
+            // The result and local types are inconsistent. Complain!
             throwLocalMismatch(resultType, localType);
             return null;
         }
+
+        if (localType == Type.OBJECT) {
+            /*
+             * The result type is more specific than the local type,
+             * so use that instead.
+             */
+            localTarget = localTarget.withType(result);
+        }
+
+        return localTarget;
     }
 
+    /**
+     * Clears the results.
+     */
     protected final void clearResult() {
-        this.resultCount = 0;
+        resultCount = 0;
     }
 
+    /**
+     * Sets the results list to be the given single value.
+     *
+     * <p><b>Note:</b> If there is more than one result value, the
+     * others may be added by using {@link #addResult}.</p>
+     *
+     * @param result {@code non-null;} result value
+     */
     protected final void setResult(TypeBearer result) {
         if (result == null) {
             throw new NullPointerException("result == null");
         }
-        this.results[0] = result;
-        this.resultCount = 1;
+
+        results[0] = result;
+        resultCount = 1;
     }
 
+    /**
+     * Adds an additional element to the list of results.
+     *
+     * @see #setResult
+     *
+     * @param result {@code non-null;} result value
+     */
     protected final void addResult(TypeBearer result) {
         if (result == null) {
             throw new NullPointerException("result == null");
         }
-        this.results[this.resultCount] = result;
-        this.resultCount++;
+
+        results[resultCount] = result;
+        resultCount++;
     }
 
+    /**
+     * Gets the count of results. This throws an exception if results were
+     * never set. (Explicitly clearing the results counts as setting them.)
+     *
+     * @return {@code >= 0;} the count
+     */
     protected final int resultCount() {
-        if (this.resultCount >= 0) {
-            return this.resultCount;
+        if (resultCount < 0) {
+            throw new SimException("results never set");
         }
-        throw new SimException("results never set");
+
+        return resultCount;
     }
 
+    /**
+     * Gets the width of the results (where a category-2 value counts as
+     * two).
+     *
+     * @return {@code >= 0;} the result width
+     */
     protected final int resultWidth() {
         int width = 0;
-        for (int i = 0; i < this.resultCount; i++) {
-            width += this.results[i].getType().getCategory();
+
+        for (int i = 0; i < resultCount; i++) {
+            width += results[i].getType().getCategory();
         }
+
         return width;
     }
 
+    /**
+     * Gets the {@code n}th result value.
+     *
+     * @param n {@code >= 0, < resultCount();} which result
+     * @return {@code non-null;} the indicated result value
+     */
     protected final TypeBearer result(int n) {
-        if (n >= this.resultCount) {
+        if (n >= resultCount) {
             throw new IllegalArgumentException("n >= resultCount");
         }
+
         try {
-            return this.results[n];
-        } catch (ArrayIndexOutOfBoundsException e) {
+            return results[n];
+        } catch (ArrayIndexOutOfBoundsException ex) {
+            // Translate the exception.
             throw new IllegalArgumentException("n < 0");
         }
     }
 
+    /**
+     * Stores the results of the latest operation into the given frame. If
+     * there is a local target (see {@link #localTarget}), then the sole
+     * result is stored to that target; otherwise any results are pushed
+     * onto the stack.
+     *
+     * @param frame {@code non-null;} frame to operate on
+     */
     protected final void storeResults(Frame frame) {
-        if (this.resultCount < 0) {
+        if (resultCount < 0) {
             throw new SimException("results never set");
-        } else if (this.resultCount != 0) {
-            if (this.localTarget != null) {
-                frame.getLocals().set(getLocalTarget(false));
-                return;
-            }
+        }
+
+        if (resultCount == 0) {
+            // Nothing to do.
+            return;
+        }
+
+        if (localTarget != null) {
+            /*
+             * Note: getLocalTarget() doesn't necessarily return
+             * localTarget directly.
+             */
+            frame.getLocals().set(getLocalTarget(false));
+        } else {
             ExecutionStack stack = frame.getStack();
-            for (int i = 0; i < this.resultCount; i++) {
-                if (this.localInfo) {
+            for (int i = 0; i < resultCount; i++) {
+                if (localInfo) {
                     stack.setLocal();
                 }
-                stack.push(this.results[i]);
+                stack.push(results[i]);
             }
         }
     }
 
-    public static void throwLocalMismatch(TypeBearer found, TypeBearer local) {
-        throw new SimException("local variable type mismatch: attempt to set or access a value of type " + found.toHuman() + " using a local variable of type " + local.toHuman() + ". This is symptomatic of .class transformation tools that ignore local variable information.");
+    /**
+     * Throws an exception that indicates a mismatch in local variable
+     * types.
+     *
+     * @param found {@code non-null;} the encountered type
+     * @param local {@code non-null;} the local variable's claimed type
+     */
+    public static void throwLocalMismatch(TypeBearer found,
+            TypeBearer local) {
+        throw new SimException("local variable type mismatch: " +
+                "attempt to set or access a value of type " +
+                found.toHuman() +
+                " using a local variable of type " +
+                local.toHuman() +
+                ". This is symptomatic of .class transformation tools " +
+                "that ignore local variable information.");
     }
 }

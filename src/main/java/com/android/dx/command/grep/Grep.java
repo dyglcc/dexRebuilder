@@ -1,99 +1,128 @@
+/*
+ * Copyright (C) 2011 The Android Open Source Project
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
 package com.android.dx.command.grep;
 
-import com.android.dex.ClassData;
-import com.android.dex.ClassData.Method;
 import com.android.dex.ClassDef;
 import com.android.dex.Dex;
 import com.android.dex.EncodedValueReader;
-import com.android.dex.MethodId;
 import com.android.dx.io.CodeReader;
-import com.android.dx.io.CodeReader.Visitor;
 import com.android.dx.io.instructions.DecodedInstruction;
+import com.android.dex.ClassData;
+import com.android.dex.MethodId;
+
 import java.io.PrintWriter;
 import java.util.HashSet;
 import java.util.Set;
 import java.util.regex.Pattern;
 
 public final class Grep {
-    private final CodeReader codeReader = new CodeReader();
-    private int count = 0;
-    private ClassDef currentClass;
-    private Method currentMethod;
     private final Dex dex;
-    private final PrintWriter out;
+    private final CodeReader codeReader = new CodeReader();
     private final Set<Integer> stringIds;
 
-    public Grep(Dex dex, Pattern pattern, PrintWriter out) {
+    private final PrintWriter out;
+    private int count = 0;
+
+    private ClassDef currentClass;
+    private ClassData.Method currentMethod;
+
+    public Grep(final Dex dex, Pattern pattern, final PrintWriter out) {
         this.dex = dex;
         this.out = out;
-        this.stringIds = getStringIds(dex, pattern);
-        this.codeReader.setStringVisitor(new Visitor() {
+
+        stringIds = getStringIds(dex, pattern);
+
+        codeReader.setStringVisitor(new CodeReader.Visitor() {
             public void visit(DecodedInstruction[] all, DecodedInstruction one) {
-                Grep.this.encounterString(one.getIndex());
+                encounterString(one.getIndex());
             }
         });
     }
 
     private void readArray(EncodedValueReader reader) {
-        int size = reader.readArray();
-        for (int i = 0; i < size; i++) {
+        for (int i = 0, size = reader.readArray(); i < size; i++) {
             switch (reader.peek()) {
-                case 23:
-                    encounterString(reader.readString());
-                    break;
-                case 28:
-                    readArray(reader);
-                    break;
-                default:
-                    break;
+            case EncodedValueReader.ENCODED_STRING:
+                encounterString(reader.readString());
+                break;
+            case EncodedValueReader.ENCODED_ARRAY:
+                readArray(reader);
+                break;
             }
         }
     }
 
     private void encounterString(int index) {
-        if (this.stringIds.contains(Integer.valueOf(index))) {
-            this.out.println(location() + " " + ((String) this.dex.strings().get(index)));
-            this.count++;
+        if (stringIds.contains(index)) {
+            out.println(location() + " " + dex.strings().get(index));
+            count++;
         }
     }
 
     private String location() {
-        String className = (String) this.dex.typeNames().get(this.currentClass.getTypeIndex());
-        if (this.currentMethod == null) {
+        String className = dex.typeNames().get(currentClass.getTypeIndex());
+        if (currentMethod != null) {
+            MethodId methodId = dex.methodIds().get(currentMethod.getMethodIndex());
+            return className + "." + dex.strings().get(methodId.getNameIndex());
+        } else {
             return className;
         }
-        return className + "." + ((String) this.dex.strings().get(((MethodId) this.dex.methodIds().get(this.currentMethod.getMethodIndex())).getNameIndex()));
     }
 
+    /**
+     * Prints usages to out. Returns the number of matches found.
+     */
     public int grep() {
-        for (ClassDef classDef : this.dex.classDefs()) {
-            this.currentClass = classDef;
-            this.currentMethod = null;
-            if (classDef.getClassDataOffset() != 0) {
-                ClassData classData = this.dex.readClassData(classDef);
-                int staticValuesOffset = classDef.getStaticValuesOffset();
-                if (staticValuesOffset != 0) {
-                    readArray(new EncodedValueReader(this.dex.open(staticValuesOffset)));
-                }
-                for (Method method : classData.allMethods()) {
-                    this.currentMethod = method;
-                    if (method.getCodeOffset() != 0) {
-                        this.codeReader.visitAll(this.dex.readCode(method).getInstructions());
-                    }
+        for (ClassDef classDef : dex.classDefs()) {
+            currentClass = classDef;
+            currentMethod = null;
+
+            if (classDef.getClassDataOffset() == 0) {
+                continue;
+            }
+
+            ClassData classData = dex.readClassData(classDef);
+
+            // find the strings in encoded constants
+            int staticValuesOffset = classDef.getStaticValuesOffset();
+            if (staticValuesOffset != 0) {
+                readArray(new EncodedValueReader(dex.open(staticValuesOffset)));
+            }
+
+            // find the strings in method bodies
+            for (ClassData.Method method : classData.allMethods()) {
+                currentMethod = method;
+                if (method.getCodeOffset() != 0) {
+                    codeReader.visitAll(dex.readCode(method).getInstructions());
                 }
             }
         }
-        this.currentClass = null;
-        this.currentMethod = null;
-        return this.count;
+
+        currentClass = null;
+        currentMethod = null;
+        return count;
     }
 
     private Set<Integer> getStringIds(Dex dex, Pattern pattern) {
-        Set<Integer> stringIds = new HashSet();
+        Set<Integer> stringIds = new HashSet<Integer>();
         int stringIndex = 0;
         for (String s : dex.strings()) {
             if (pattern.matcher(s).find()) {
-                stringIds.add(Integer.valueOf(stringIndex));
+                stringIds.add(stringIndex);
             }
             stringIndex++;
         }

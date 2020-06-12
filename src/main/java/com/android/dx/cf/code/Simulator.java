@@ -1,479 +1,99 @@
+/*
+ * Copyright (C) 2007 The Android Open Source Project
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
 package com.android.dx.cf.code;
 
-import com.android.dx.cf.code.BytecodeArray.Visitor;
-import com.android.dx.cf.code.LocalVariableList.Item;
-import com.android.dx.dex.DexOptions;
-import com.android.dx.rop.code.LocalItem;
 import com.android.dx.rop.cst.Constant;
-import com.android.dx.rop.cst.CstFieldRef;
 import com.android.dx.rop.cst.CstInteger;
 import com.android.dx.rop.cst.CstInterfaceMethodRef;
-import com.android.dx.rop.cst.CstInvokeDynamic;
-import com.android.dx.rop.cst.CstMethodHandle;
-import com.android.dx.rop.cst.CstMethodRef;
-import com.android.dx.rop.cst.CstProtoRef;
 import com.android.dx.rop.cst.CstType;
 import com.android.dx.rop.type.Prototype;
+import com.android.dx.rop.code.LocalItem;
+import com.android.dx.rop.cst.CstFieldRef;
+import com.android.dx.rop.cst.CstMethodRef;
 import com.android.dx.rop.type.Type;
 import com.android.dx.util.Hex;
+
 import java.util.ArrayList;
 
+/**
+ * Class which knows how to simulate the effects of executing bytecode.
+ *
+ * <p><b>Note:</b> This class is not thread-safe. If multiple threads
+ * need to use a single instance, they must synchronize access explicitly
+ * between themselves.</p>
+ */
 public class Simulator {
-    static final /* synthetic */ boolean $assertionsDisabled = (!Simulator.class.desiredAssertionStatus() ? true : $assertionsDisabled);
-    private static final String LOCAL_MISMATCH_ERROR = "This is symptomatic of .class transformation tools that ignore local variable information.";
-    private final BytecodeArray code;
-    private final DexOptions dexOptions;
-    private final LocalVariableList localVariables;
+    /**
+     * {@code non-null;} canned error message for local variable
+     * table mismatches
+     */
+    private static final String LOCAL_MISMATCH_ERROR =
+        "This is symptomatic of .class transformation tools that ignore " +
+        "local variable information.";
+
+    /** {@code non-null;} machine to use when simulating */
     private final Machine machine;
-    private ConcreteMethod method;
+
+    /** {@code non-null;} array of bytecode */
+    private final BytecodeArray code;
+
+    /** {@code non-null;} local variable information */
+    private final LocalVariableList localVariables;
+
+    /** {@code non-null;} visitor instance to use */
     private final SimVisitor visitor;
 
-    private class SimVisitor implements Visitor {
-        private Frame frame = null;
-        private final Machine machine;
-        private int previousOffset;
-
-        public SimVisitor() {
-            this.machine = Simulator.this.machine;
-        }
-
-        public void setFrame(Frame frame) {
-            if (frame == null) {
-                throw new NullPointerException("frame == null");
-            }
-            this.frame = frame;
-        }
-
-        public void visitInvalid(int opcode, int offset, int length) {
-            throw new SimException("invalid opcode " + Hex.u1(opcode));
-        }
-
-        public void visitNoArgs(int opcode, int offset, int length, Type type) {
-            Type requiredArrayType;
-            ExecutionStack stack;
-            switch (opcode) {
-                case 0:
-                    this.machine.clearArgs();
-                    break;
-                case 46:
-                    requiredArrayType = Simulator.requiredArrayTypeFor(type, this.frame.getStack().peekType(1));
-                    if (requiredArrayType == Type.KNOWN_NULL) {
-                        type = Type.KNOWN_NULL;
-                    } else {
-                        type = requiredArrayType.getComponentType();
-                    }
-                    this.machine.popArgs(this.frame, requiredArrayType, Type.INT);
-                    break;
-                case 79:
-                    stack = this.frame.getStack();
-                    int peekDepth = type.isCategory1() ? 2 : 3;
-                    Type foundArrayType = stack.peekType(peekDepth);
-                    boolean foundArrayLocal = stack.peekLocal(peekDepth);
-                    requiredArrayType = Simulator.requiredArrayTypeFor(type, foundArrayType);
-                    if (foundArrayLocal) {
-                        if (requiredArrayType == Type.KNOWN_NULL) {
-                            type = Type.KNOWN_NULL;
-                        } else {
-                            type = requiredArrayType.getComponentType();
-                        }
-                    }
-                    this.machine.popArgs(this.frame, requiredArrayType, Type.INT, type);
-                    break;
-                case 87:
-                    if (!this.frame.getStack().peekType(0).isCategory2()) {
-                        this.machine.popArgs(this.frame, 1);
-                        break;
-                    }
-                    throw Simulator.illegalTos();
-                case 88:
-                case 92:
-                    int pattern;
-                    stack = this.frame.getStack();
-                    if (stack.peekType(0).isCategory2()) {
-                        this.machine.popArgs(this.frame, 1);
-                        pattern = 17;
-                    } else if (stack.peekType(1).isCategory1()) {
-                        this.machine.popArgs(this.frame, 2);
-                        pattern = 8481;
-                    } else {
-                        throw Simulator.illegalTos();
-                    }
-                    if (opcode == 92) {
-                        this.machine.auxIntArg(pattern);
-                        break;
-                    }
-                    break;
-                case 89:
-                    if (!this.frame.getStack().peekType(0).isCategory2()) {
-                        this.machine.popArgs(this.frame, 1);
-                        this.machine.auxIntArg(17);
-                        break;
-                    }
-                    throw Simulator.illegalTos();
-                case 90:
-                    stack = this.frame.getStack();
-                    if (stack.peekType(0).isCategory1() && stack.peekType(1).isCategory1()) {
-                        this.machine.popArgs(this.frame, 2);
-                        this.machine.auxIntArg(530);
-                        break;
-                    }
-                    throw Simulator.illegalTos();
-                    break;
-                case 91:
-                    stack = this.frame.getStack();
-                    if (stack.peekType(0).isCategory2()) {
-                        throw Simulator.illegalTos();
-                    } else if (stack.peekType(1).isCategory2()) {
-                        this.machine.popArgs(this.frame, 2);
-                        this.machine.auxIntArg(530);
-                        break;
-                    } else if (stack.peekType(2).isCategory1()) {
-                        this.machine.popArgs(this.frame, 3);
-                        this.machine.auxIntArg(12819);
-                        break;
-                    } else {
-                        throw Simulator.illegalTos();
-                    }
-                case 93:
-                    stack = this.frame.getStack();
-                    if (!stack.peekType(0).isCategory2()) {
-                        if (!stack.peekType(1).isCategory2() && !stack.peekType(2).isCategory2()) {
-                            this.machine.popArgs(this.frame, 3);
-                            this.machine.auxIntArg(205106);
-                            break;
-                        }
-                        throw Simulator.illegalTos();
-                    } else if (!stack.peekType(2).isCategory2()) {
-                        this.machine.popArgs(this.frame, 2);
-                        this.machine.auxIntArg(530);
-                        break;
-                    } else {
-                        throw Simulator.illegalTos();
-                    }
-                    break;
-                case 94:
-                    stack = this.frame.getStack();
-                    if (stack.peekType(0).isCategory2()) {
-                        if (stack.peekType(2).isCategory2()) {
-                            this.machine.popArgs(this.frame, 2);
-                            this.machine.auxIntArg(530);
-                            break;
-                        } else if (stack.peekType(3).isCategory1()) {
-                            this.machine.popArgs(this.frame, 3);
-                            this.machine.auxIntArg(12819);
-                            break;
-                        } else {
-                            throw Simulator.illegalTos();
-                        }
-                    } else if (!stack.peekType(1).isCategory1()) {
-                        throw Simulator.illegalTos();
-                    } else if (stack.peekType(2).isCategory2()) {
-                        this.machine.popArgs(this.frame, 3);
-                        this.machine.auxIntArg(205106);
-                        break;
-                    } else if (stack.peekType(3).isCategory1()) {
-                        this.machine.popArgs(this.frame, 4);
-                        this.machine.auxIntArg(4399427);
-                        break;
-                    } else {
-                        throw Simulator.illegalTos();
-                    }
-                case 95:
-                    stack = this.frame.getStack();
-                    if (stack.peekType(0).isCategory1() && stack.peekType(1).isCategory1()) {
-                        this.machine.popArgs(this.frame, 2);
-                        this.machine.auxIntArg(18);
-                        break;
-                    }
-                    throw Simulator.illegalTos();
-                    break;
-                case 96:
-                case 100:
-                case 104:
-                case 108:
-                case 112:
-                case 126:
-                case 128:
-                case 130:
-                    this.machine.popArgs(this.frame, type, type);
-                    break;
-                case 116:
-                    this.machine.popArgs(this.frame, type);
-                    break;
-                case 120:
-                case ByteOps.ISHR /*122*/:
-                case 124:
-                    this.machine.popArgs(this.frame, type, Type.INT);
-                    break;
-                case 133:
-                case 134:
-                case 135:
-                case 145:
-                case 146:
-                case 147:
-                    this.machine.popArgs(this.frame, Type.INT);
-                    break;
-                case 136:
-                case 137:
-                case 138:
-                    this.machine.popArgs(this.frame, Type.LONG);
-                    break;
-                case 139:
-                case 140:
-                case 141:
-                    this.machine.popArgs(this.frame, Type.FLOAT);
-                    break;
-                case 142:
-                case 143:
-                case 144:
-                    this.machine.popArgs(this.frame, Type.DOUBLE);
-                    break;
-                case 148:
-                    this.machine.popArgs(this.frame, Type.LONG, Type.LONG);
-                    break;
-                case 149:
-                case 150:
-                    this.machine.popArgs(this.frame, Type.FLOAT, Type.FLOAT);
-                    break;
-                case 151:
-                case 152:
-                    this.machine.popArgs(this.frame, Type.DOUBLE, Type.DOUBLE);
-                    break;
-                case 172:
-                    Type checkType = type;
-                    if (type == Type.OBJECT) {
-                        checkType = this.frame.getStack().peekType(0);
-                    }
-                    this.machine.popArgs(this.frame, type);
-                    checkReturnType(checkType);
-                    break;
-                case 177:
-                    this.machine.clearArgs();
-                    checkReturnType(Type.VOID);
-                    break;
-                case 190:
-                    Type arrayType = this.frame.getStack().peekType(0);
-                    if (!arrayType.isArrayOrKnownNull()) {
-                        Simulator.this.fail("type mismatch: expected array type but encountered " + arrayType.toHuman());
-                    }
-                    this.machine.popArgs(this.frame, Type.OBJECT);
-                    break;
-                case 191:
-                case 194:
-                case 195:
-                    this.machine.popArgs(this.frame, Type.OBJECT);
-                    break;
-                default:
-                    visitInvalid(opcode, offset, length);
-                    return;
-            }
-            this.machine.auxType(type);
-            this.machine.run(this.frame, offset, opcode);
-        }
-
-        private void checkReturnType(Type encountered) {
-            Type returnType = this.machine.getPrototype().getReturnType();
-            if (!Merger.isPossiblyAssignableFrom(returnType, encountered)) {
-                Simulator.this.fail("return type mismatch: prototype indicates " + returnType.toHuman() + ", but encountered type " + encountered.toHuman());
-            }
-        }
-
-        public void visitLocal(int opcode, int offset, int length, int idx, Type type, int value) {
-            int localOffset;
-            Type localType;
-            LocalItem item = null;
-            if (opcode == 54) {
-                localOffset = offset + length;
-            } else {
-                localOffset = offset;
-            }
-            Item local = Simulator.this.localVariables.pcAndIndexToLocal(localOffset, idx);
-            if (local != null) {
-                localType = local.getType();
-                if (localType.getBasicFrameType() != type.getBasicFrameType()) {
-                    local = null;
-                    localType = type;
-                }
-            } else {
-                localType = type;
-            }
-            switch (opcode) {
-                case 21:
-                case 169:
-                    this.machine.localArg(this.frame, idx);
-                    this.machine.localInfo(local != null ? true : Simulator.$assertionsDisabled);
-                    this.machine.auxType(type);
-                    break;
-                case 54:
-                    if (local != null) {
-                        item = local.getLocalItem();
-                    }
-                    this.machine.popArgs(this.frame, type);
-                    this.machine.auxType(type);
-                    this.machine.localTarget(idx, localType, item);
-                    break;
-                case 132:
-                    if (local != null) {
-                        item = local.getLocalItem();
-                    }
-                    this.machine.localArg(this.frame, idx);
-                    this.machine.localTarget(idx, localType, item);
-                    this.machine.auxType(type);
-                    this.machine.auxIntArg(value);
-                    this.machine.auxCstArg(CstInteger.make(value));
-                    break;
-                default:
-                    visitInvalid(opcode, offset, length);
-                    return;
-            }
-            this.machine.run(this.frame, offset, opcode);
-        }
-
-        public void visitConstant(int opcode, int offset, int length, Constant cst, int value) {
-            switch (opcode) {
-                case 18:
-                case 19:
-                    if ((cst instanceof CstMethodHandle) || (cst instanceof CstProtoRef)) {
-                        Simulator.this.checkConstMethodHandleSupported(cst);
-                    }
-                    this.machine.clearArgs();
-                    break;
-                case 179:
-                    this.machine.popArgs(this.frame, ((CstFieldRef) cst).getType());
-                    break;
-                case 180:
-                case 192:
-                case 193:
-                    this.machine.popArgs(this.frame, Type.OBJECT);
-                    break;
-                case 181:
-                    this.machine.popArgs(this.frame, Type.OBJECT, ((CstFieldRef) cst).getType());
-                    break;
-                case 182:
-                case 183:
-                case 184:
-                case 185:
-                    if (cst instanceof CstInterfaceMethodRef) {
-                        cst = ((CstInterfaceMethodRef) cst).toMethodRef();
-                        Simulator.this.checkInvokeInterfaceSupported(opcode, (CstMethodRef) cst);
-                    }
-                    if ((cst instanceof CstMethodRef) && ((CstMethodRef) cst).isSignaturePolymorphic()) {
-                        Simulator.this.checkInvokeSignaturePolymorphic(opcode);
-                    }
-                    this.machine.popArgs(this.frame, ((CstMethodRef) cst).getPrototype(opcode == 184 ? true : Simulator.$assertionsDisabled));
-                    break;
-                case 186:
-                    Simulator.this.checkInvokeDynamicSupported(opcode);
-                    CstInvokeDynamic invokeDynamicRef = (CstInvokeDynamic) cst;
-                    this.machine.popArgs(this.frame, invokeDynamicRef.getPrototype());
-                    cst = invokeDynamicRef.addReference();
-                    break;
-                case 189:
-                    this.machine.popArgs(this.frame, Type.INT);
-                    break;
-                case 197:
-                    this.machine.popArgs(this.frame, Prototype.internInts(Type.VOID, value));
-                    break;
-                default:
-                    this.machine.clearArgs();
-                    break;
-            }
-            this.machine.auxIntArg(value);
-            this.machine.auxCstArg(cst);
-            this.machine.run(this.frame, offset, opcode);
-        }
-
-        public void visitBranch(int opcode, int offset, int length, int target) {
-            switch (opcode) {
-                case 153:
-                case 154:
-                case 155:
-                case 156:
-                case 157:
-                case 158:
-                    this.machine.popArgs(this.frame, Type.INT);
-                    break;
-                case 159:
-                case 160:
-                case 161:
-                case 162:
-                case 163:
-                case 164:
-                    this.machine.popArgs(this.frame, Type.INT, Type.INT);
-                    break;
-                case 165:
-                case 166:
-                    this.machine.popArgs(this.frame, Type.OBJECT, Type.OBJECT);
-                    break;
-                case 167:
-                case 168:
-                case 200:
-                case 201:
-                    this.machine.clearArgs();
-                    break;
-                case 198:
-                case 199:
-                    this.machine.popArgs(this.frame, Type.OBJECT);
-                    break;
-                default:
-                    visitInvalid(opcode, offset, length);
-                    return;
-            }
-            this.machine.auxTargetArg(target);
-            this.machine.run(this.frame, offset, opcode);
-        }
-
-        public void visitSwitch(int opcode, int offset, int length, SwitchList cases, int padding) {
-            this.machine.popArgs(this.frame, Type.INT);
-            this.machine.auxIntArg(padding);
-            this.machine.auxSwitchArg(cases);
-            this.machine.run(this.frame, offset, opcode);
-        }
-
-        public void visitNewarray(int offset, int length, CstType type, ArrayList<Constant> initValues) {
-            this.machine.popArgs(this.frame, Type.INT);
-            this.machine.auxInitValues(initValues);
-            this.machine.auxCstArg(type);
-            this.machine.run(this.frame, offset, 188);
-        }
-
-        public void setPreviousOffset(int offset) {
-            this.previousOffset = offset;
-        }
-
-        public int getPreviousOffset() {
-            return this.previousOffset;
-        }
-    }
-
-    public Simulator(Machine machine, ConcreteMethod method, DexOptions dexOptions) {
+    /**
+     * Constructs an instance.
+     *
+     * @param machine {@code non-null;} machine to use when simulating
+     * @param method {@code non-null;} method data to use
+     */
+    public Simulator(Machine machine, ConcreteMethod method) {
         if (machine == null) {
             throw new NullPointerException("machine == null");
-        } else if (method == null) {
-            throw new NullPointerException("method == null");
-        } else if (dexOptions == null) {
-            throw new NullPointerException("dexOptions == null");
-        } else {
-            this.machine = machine;
-            this.code = method.getCode();
-            this.method = method;
-            this.localVariables = method.getLocalVariables();
-            this.visitor = new SimVisitor();
-            this.dexOptions = dexOptions;
-            if (method.isDefaultOrStaticInterfaceMethod()) {
-                checkInterfaceMethodDeclaration(method);
-            }
         }
+
+        if (method == null) {
+            throw new NullPointerException("method == null");
+        }
+
+        this.machine = machine;
+        this.code = method.getCode();
+        this.localVariables = method.getLocalVariables();
+        this.visitor = new SimVisitor();
     }
 
+    /**
+     * Simulates the effect of executing the given basic block. This modifies
+     * the passed-in frame to represent the end result.
+     *
+     * @param bb {@code non-null;} the basic block
+     * @param frame {@code non-null;} frame to operate on
+     */
     public void simulate(ByteBlock bb, Frame frame) {
         int end = bb.getEnd();
-        this.visitor.setFrame(frame);
+
+        visitor.setFrame(frame);
+
         try {
-            int off = bb.getStart();
-            while (off < end) {
-                int length = this.code.parseInstruction(off, this.visitor);
-                this.visitor.setPreviousOffset(off);
+            for (int off = bb.getStart(); off < end; /*off*/) {
+                int length = code.parseInstruction(off, visitor);
+                visitor.setPreviousOffset(off);
                 off += length;
             }
         } catch (SimException ex) {
@@ -482,86 +102,682 @@ public class Simulator {
         }
     }
 
+    /**
+     * Simulates the effect of the instruction at the given offset, by
+     * making appropriate calls on the given frame.
+     *
+     * @param offset {@code >= 0;} offset of the instruction to simulate
+     * @param frame {@code non-null;} frame to operate on
+     * @return the length of the instruction, in bytes
+     */
     public int simulate(int offset, Frame frame) {
-        this.visitor.setFrame(frame);
-        return this.code.parseInstruction(offset, this.visitor);
+        visitor.setFrame(frame);
+        return code.parseInstruction(offset, visitor);
     }
 
+    /**
+     * Constructs an "illegal top-of-stack" exception, for the stack
+     * manipulation opcodes.
+     */
     private static SimException illegalTos() {
-        return new SimException("stack mismatch: illegal top-of-stack for opcode");
+        return new SimException("stack mismatch: illegal " +
+                "top-of-stack for opcode");
     }
 
-    private static Type requiredArrayTypeFor(Type impliedType, Type foundArrayType) {
+    /**
+     * Returns the required array type for an array load or store
+     * instruction, based on a given implied type and an observed
+     * actual array type.
+     *
+     * <p>The interesting cases here have to do with object arrays,
+     * <code>byte[]</code>s, <code>boolean[]</code>s, and
+     * known-nulls.</p>
+     *
+     * <p>In the case of arrays of objects, we want to narrow the type
+     * to the actual array present on the stack, as long as what is
+     * present is an object type. Similarly, due to a quirk of the
+     * original bytecode representation, the instructions for dealing
+     * with <code>byte[]</code> and <code>boolean[]</code> are
+     * undifferentiated, and we aim here to return whichever one was
+     * actually present on the stack.</p>
+     *
+     * <p>In the case where there is a known-null on the stack where
+     * an array is expected, our behavior depends on the implied type
+     * of the instruction. When the implied type is a reference, we
+     * don't attempt to infer anything, as we don't know the dimension
+     * of the null constant and thus any explicit inferred type could
+     * be wrong. When the implied type is a primitive, we fall back to
+     * the implied type of the instruction. Due to the quirk described
+     * above, this means that source code that uses
+     * <code>boolean[]</code> might get translated surprisingly -- but
+     * correctly -- into an instruction that specifies a
+     * <code>byte[]</code>. It will be correct, because should the
+     * code actually execute, it will necessarily throw a
+     * <code>NullPointerException</code>, and it won't matter what
+     * opcode variant is used to achieve that result.</p>
+     *
+     * @param impliedType {@code non-null;} type implied by the
+     * instruction; is <i>not</i> an array type
+     * @param foundArrayType {@code non-null;} type found on the
+     * stack; is either an array type or a known-null
+     * @return {@code non-null;} the array type that should be
+     * required in this context
+     */
+    private static Type requiredArrayTypeFor(Type impliedType,
+                                             Type foundArrayType) {
         if (foundArrayType == Type.KNOWN_NULL) {
-            if (impliedType.isReference()) {
-                return Type.KNOWN_NULL;
-            }
-            return impliedType.getArrayType();
-        } else if (impliedType == Type.OBJECT && foundArrayType.isArray() && foundArrayType.getComponentType().isReference()) {
+            return impliedType.isReference()
+                ? Type.KNOWN_NULL
+                : impliedType.getArrayType();
+        }
+
+        if ((impliedType == Type.OBJECT)
+                && foundArrayType.isArray()
+                && foundArrayType.getComponentType().isReference()) {
             return foundArrayType;
-        } else {
-            if (impliedType == Type.BYTE && foundArrayType == Type.BOOLEAN_ARRAY) {
-                return Type.BOOLEAN_ARRAY;
+        }
+
+        if ((impliedType == Type.BYTE)
+                && (foundArrayType == Type.BOOLEAN_ARRAY)) {
+            /*
+             * Per above, an instruction with implied byte[] is also
+             * allowed to be used on boolean[].
+             */
+            return Type.BOOLEAN_ARRAY;
+        }
+
+        return impliedType.getArrayType();
+    }
+
+    /**
+     * Bytecode visitor used during simulation.
+     */
+    private class SimVisitor implements BytecodeArray.Visitor {
+        /**
+         * {@code non-null;} machine instance to use (just to avoid excessive
+         * cross-object field access)
+         */
+        private final Machine machine;
+
+        /**
+         * {@code null-ok;} frame to use; set with each call to
+         * {@link Simulator#simulate}
+         */
+        private Frame frame;
+
+        /** offset of the previous bytecode */
+        private int previousOffset;
+
+        /**
+         * Constructs an instance.
+         */
+        public SimVisitor() {
+            this.machine = Simulator.this.machine;
+            this.frame = null;
+        }
+
+        /**
+         * Sets the frame to act on.
+         *
+         * @param frame {@code non-null;} the frame
+         */
+        public void setFrame(Frame frame) {
+            if (frame == null) {
+                throw new NullPointerException("frame == null");
             }
-            return impliedType.getArrayType();
-        }
-    }
 
-    private void checkConstMethodHandleSupported(Constant cst) throws SimException {
-        if (!this.dexOptions.apiIsSupported(28)) {
-            fail(String.format("invalid constant type %s requires --min-sdk-version >= %d (currently %d)", new Object[]{cst.typeName(), Integer.valueOf(28), Integer.valueOf(this.dexOptions.minSdkVersion)}));
+            this.frame = frame;
         }
-    }
 
-    private void checkInvokeDynamicSupported(int opcode) throws SimException {
-        if (!this.dexOptions.apiIsSupported(26)) {
-            fail(String.format("invalid opcode %02x - invokedynamic requires --min-sdk-version >= %d (currently %d)", new Object[]{Integer.valueOf(opcode), Integer.valueOf(26), Integer.valueOf(this.dexOptions.minSdkVersion)}));
+        /** {@inheritDoc} */
+        public void visitInvalid(int opcode, int offset, int length) {
+            throw new SimException("invalid opcode " + Hex.u1(opcode));
         }
-    }
 
-    private void checkInvokeInterfaceSupported(int opcode, CstMethodRef callee) {
-        if (opcode != 185 && !this.dexOptions.apiIsSupported(24)) {
-            boolean softFail = this.dexOptions.allowAllInterfaceMethodInvokes;
-            if (opcode == 184) {
-                softFail &= this.dexOptions.apiIsSupported(21);
-            } else if (!($assertionsDisabled || opcode == 183 || opcode == 182)) {
-                throw new AssertionError();
+        /** {@inheritDoc} */
+        public void visitNoArgs(int opcode, int offset, int length,
+                Type type) {
+            switch (opcode) {
+                case ByteOps.NOP: {
+                    machine.clearArgs();
+                    break;
+                }
+                case ByteOps.INEG: {
+                    machine.popArgs(frame, type);
+                    break;
+                }
+                case ByteOps.I2L:
+                case ByteOps.I2F:
+                case ByteOps.I2D:
+                case ByteOps.I2B:
+                case ByteOps.I2C:
+                case ByteOps.I2S: {
+                    machine.popArgs(frame, Type.INT);
+                    break;
+                }
+                case ByteOps.L2I:
+                case ByteOps.L2F:
+                case ByteOps.L2D: {
+                    machine.popArgs(frame, Type.LONG);
+                    break;
+                }
+                case ByteOps.F2I:
+                case ByteOps.F2L:
+                case ByteOps.F2D: {
+                    machine.popArgs(frame, Type.FLOAT);
+                    break;
+                }
+                case ByteOps.D2I:
+                case ByteOps.D2L:
+                case ByteOps.D2F: {
+                    machine.popArgs(frame, Type.DOUBLE);
+                    break;
+                }
+                case ByteOps.RETURN: {
+                    machine.clearArgs();
+                    checkReturnType(Type.VOID);
+                    break;
+                }
+                case ByteOps.IRETURN: {
+                    Type checkType = type;
+                    if (type == Type.OBJECT) {
+                        /*
+                         * For an object return, use the best-known
+                         * type of the popped value.
+                         */
+                        checkType = frame.getStack().peekType(0);
+                    }
+                    machine.popArgs(frame, type);
+                    checkReturnType(checkType);
+                    break;
+                }
+                case ByteOps.POP: {
+                    Type peekType = frame.getStack().peekType(0);
+                    if (peekType.isCategory2()) {
+                        throw illegalTos();
+                    }
+                    machine.popArgs(frame, 1);
+                    break;
+                }
+                case ByteOps.ARRAYLENGTH: {
+                    Type arrayType = frame.getStack().peekType(0);
+                    if (!arrayType.isArrayOrKnownNull()) {
+                        throw new SimException("type mismatch: expected " +
+                                "array type but encountered " +
+                                arrayType.toHuman());
+                    }
+                    machine.popArgs(frame, Type.OBJECT);
+                    break;
+                }
+                case ByteOps.ATHROW:
+                case ByteOps.MONITORENTER:
+                case ByteOps.MONITOREXIT: {
+                    machine.popArgs(frame, Type.OBJECT);
+                    break;
+                }
+                case ByteOps.IALOAD: {
+                    /*
+                     * See comment on requiredArrayTypeFor() for explanation
+                     * about what's going on here.
+                     */
+                    Type foundArrayType = frame.getStack().peekType(1);
+                    Type requiredArrayType =
+                        requiredArrayTypeFor(type, foundArrayType);
+
+                    // Make type agree with the discovered requiredArrayType.
+                    type = (requiredArrayType == Type.KNOWN_NULL)
+                        ? Type.KNOWN_NULL
+                        : requiredArrayType.getComponentType();
+
+                    machine.popArgs(frame, requiredArrayType, Type.INT);
+                    break;
+                }
+                case ByteOps.IADD:
+                case ByteOps.ISUB:
+                case ByteOps.IMUL:
+                case ByteOps.IDIV:
+                case ByteOps.IREM:
+                case ByteOps.IAND:
+                case ByteOps.IOR:
+                case ByteOps.IXOR: {
+                    machine.popArgs(frame, type, type);
+                    break;
+                }
+                case ByteOps.ISHL:
+                case ByteOps.ISHR:
+                case ByteOps.IUSHR: {
+                    machine.popArgs(frame, type, Type.INT);
+                    break;
+                }
+                case ByteOps.LCMP: {
+                    machine.popArgs(frame, Type.LONG, Type.LONG);
+                    break;
+                }
+                case ByteOps.FCMPL:
+                case ByteOps.FCMPG: {
+                    machine.popArgs(frame, Type.FLOAT, Type.FLOAT);
+                    break;
+                }
+                case ByteOps.DCMPL:
+                case ByteOps.DCMPG: {
+                    machine.popArgs(frame, Type.DOUBLE, Type.DOUBLE);
+                    break;
+                }
+                case ByteOps.IASTORE: {
+                    /*
+                     * See comment on requiredArrayTypeFor() for
+                     * explanation about what's going on here. In
+                     * addition to that, the category 1 vs. 2 thing
+                     * below is to deal with the fact that, if the
+                     * element type is category 2, we have to skip
+                     * over one extra stack slot to find the array.
+                     */
+                    ExecutionStack stack = frame.getStack();
+                    int peekDepth = type.isCategory1() ? 2 : 3;
+                    Type foundArrayType = stack.peekType(peekDepth);
+                    boolean foundArrayLocal = stack.peekLocal(peekDepth);
+
+                    Type requiredArrayType =
+                        requiredArrayTypeFor(type, foundArrayType);
+
+                    /*
+                     * Make type agree with the discovered requiredArrayType
+                     * if it has local info.
+                     */
+                    if (foundArrayLocal) {
+                        type = (requiredArrayType == Type.KNOWN_NULL)
+                            ? Type.KNOWN_NULL
+                            : requiredArrayType.getComponentType();
+                    }
+
+                    machine.popArgs(frame, requiredArrayType, Type.INT, type);
+                    break;
+                }
+                case ByteOps.POP2:
+                case ByteOps.DUP2: {
+                    ExecutionStack stack = frame.getStack();
+                    int pattern;
+
+                    if (stack.peekType(0).isCategory2()) {
+                        // "form 2" in vmspec-2
+                        machine.popArgs(frame, 1);
+                        pattern = 0x11;
+                    } else if (stack.peekType(1).isCategory1()) {
+                        // "form 1"
+                        machine.popArgs(frame, 2);
+                        pattern = 0x2121;
+                    } else {
+                        throw illegalTos();
+                    }
+
+                    if (opcode == ByteOps.DUP2) {
+                        machine.auxIntArg(pattern);
+                    }
+                    break;
+                }
+                case ByteOps.DUP: {
+                    Type peekType = frame.getStack().peekType(0);
+
+                    if (peekType.isCategory2()) {
+                        throw illegalTos();
+                    }
+
+                    machine.popArgs(frame, 1);
+                    machine.auxIntArg(0x11);
+                    break;
+                }
+                case ByteOps.DUP_X1: {
+                    ExecutionStack stack = frame.getStack();
+
+                    if (!(stack.peekType(0).isCategory1() &&
+                          stack.peekType(1).isCategory1())) {
+                        throw illegalTos();
+                    }
+
+                    machine.popArgs(frame, 2);
+                    machine.auxIntArg(0x212);
+                    break;
+                }
+                case ByteOps.DUP_X2: {
+                    ExecutionStack stack = frame.getStack();
+
+                    if (stack.peekType(0).isCategory2()) {
+                        throw illegalTos();
+                    }
+
+                    if (stack.peekType(1).isCategory2()) {
+                        // "form 2" in vmspec-2
+                        machine.popArgs(frame, 2);
+                        machine.auxIntArg(0x212);
+                    } else if (stack.peekType(2).isCategory1()) {
+                        // "form 1"
+                        machine.popArgs(frame, 3);
+                        machine.auxIntArg(0x3213);
+                    } else {
+                        throw illegalTos();
+                    }
+                    break;
+                }
+                case ByteOps.DUP2_X1: {
+                    ExecutionStack stack = frame.getStack();
+
+                    if (stack.peekType(0).isCategory2()) {
+                        // "form 2" in vmspec-2
+                        if (stack.peekType(2).isCategory2()) {
+                            throw illegalTos();
+                        }
+                        machine.popArgs(frame, 2);
+                        machine.auxIntArg(0x212);
+                    } else {
+                        // "form 1"
+                        if (stack.peekType(1).isCategory2() ||
+                            stack.peekType(2).isCategory2()) {
+                            throw illegalTos();
+                        }
+                        machine.popArgs(frame, 3);
+                        machine.auxIntArg(0x32132);
+                    }
+                    break;
+                }
+                case ByteOps.DUP2_X2: {
+                    ExecutionStack stack = frame.getStack();
+
+                    if (stack.peekType(0).isCategory2()) {
+                        if (stack.peekType(2).isCategory2()) {
+                            // "form 4" in vmspec-2
+                            machine.popArgs(frame, 2);
+                            machine.auxIntArg(0x212);
+                        } else if (stack.peekType(3).isCategory1()) {
+                            // "form 2"
+                            machine.popArgs(frame, 3);
+                            machine.auxIntArg(0x3213);
+                        } else {
+                            throw illegalTos();
+                        }
+                    } else if (stack.peekType(1).isCategory1()) {
+                        if (stack.peekType(2).isCategory2()) {
+                            // "form 3"
+                            machine.popArgs(frame, 3);
+                            machine.auxIntArg(0x32132);
+                        } else if (stack.peekType(3).isCategory1()) {
+                            // "form 1"
+                            machine.popArgs(frame, 4);
+                            machine.auxIntArg(0x432143);
+                        } else {
+                            throw illegalTos();
+                        }
+                    } else {
+                        throw illegalTos();
+                    }
+                    break;
+                }
+                case ByteOps.SWAP: {
+                    ExecutionStack stack = frame.getStack();
+
+                    if (!(stack.peekType(0).isCategory1() &&
+                          stack.peekType(1).isCategory1())) {
+                        throw illegalTos();
+                    }
+
+                    machine.popArgs(frame, 2);
+                    machine.auxIntArg(0x12);
+                    break;
+                }
+                default: {
+                    visitInvalid(opcode, offset, length);
+                    return;
+                }
             }
-            String invokeKind = opcode == 184 ? "static" : "default";
-            if (softFail) {
-                warn(String.format("invoking a %s interface method %s.%s strictly requires --min-sdk-version >= %d (experimental at current API level %d)", new Object[]{invokeKind, callee.getDefiningClass().toHuman(), callee.getNat().toHuman(), Integer.valueOf(24), Integer.valueOf(this.dexOptions.minSdkVersion)}));
+
+            machine.auxType(type);
+            machine.run(frame, offset, opcode);
+        }
+
+        /**
+         * Checks whether the prototype is compatible with returning the
+         * given type, and throws if not.
+         *
+         * @param encountered {@code non-null;} the encountered return type
+         */
+        private void checkReturnType(Type encountered) {
+            Type returnType = machine.getPrototype().getReturnType();
+
+            /*
+             * Check to see if the prototype's return type is
+             * possibly assignable from the type we encountered. This
+             * takes care of all the salient cases (types are the same,
+             * they're compatible primitive types, etc.).
+             */
+            if (!Merger.isPossiblyAssignableFrom(returnType, encountered)) {
+                throw new SimException("return type mismatch: prototype " +
+                        "indicates " + returnType.toHuman() +
+                        ", but encountered type " + encountered.toHuman());
+            }
+        }
+
+        /** {@inheritDoc} */
+        public void visitLocal(int opcode, int offset, int length,
+                int idx, Type type, int value) {
+            /*
+             * Note that the "type" parameter is always the simplest
+             * type based on the original opcode, e.g., "int" for
+             * "iload" (per se) and "Object" for "aload". So, when
+             * possible, we replace the type with the one indicated in
+             * the local variable table, though we still need to check
+             * to make sure it's valid for the opcode.
+             *
+             * The reason we use (offset + length) for the localOffset
+             * for a store is because it is only after the store that
+             * the local type becomes valid. On the other hand, the
+             * type associated with a load is valid at the start of
+             * the instruction.
+             */
+            int localOffset =
+                (opcode == ByteOps.ISTORE) ? (offset + length) : offset;
+            LocalVariableList.Item local =
+                localVariables.pcAndIndexToLocal(localOffset, idx);
+            Type localType;
+
+            if (local != null) {
+                localType = local.getType();
+                if (localType.getBasicFrameType() !=
+                        type.getBasicFrameType()) {
+                    BaseMachine.throwLocalMismatch(type, localType);
+                    return;
+                }
             } else {
-                fail(String.format("invoking a %s interface method %s.%s strictly requires --min-sdk-version >= %d (blocked at current API level %d)", new Object[]{invokeKind, callee.getDefiningClass().toHuman(), callee.getNat().toHuman(), Integer.valueOf(24), Integer.valueOf(this.dexOptions.minSdkVersion)}));
+                localType = type;
             }
+
+            switch (opcode) {
+                case ByteOps.ILOAD:
+                case ByteOps.RET: {
+                    machine.localArg(frame, idx);
+                    machine.localInfo(local != null);
+                    machine.auxType(type);
+                    break;
+                }
+                case ByteOps.ISTORE: {
+                    LocalItem item
+                            = (local == null) ? null : local.getLocalItem();
+                    machine.popArgs(frame, type);
+                    machine.auxType(type);
+                    machine.localTarget(idx, localType, item);
+                    break;
+                }
+                case ByteOps.IINC: {
+                    LocalItem item
+                            = (local == null) ? null : local.getLocalItem();
+                    machine.localArg(frame, idx);
+                    machine.localTarget(idx, localType, item);
+                    machine.auxType(type);
+                    machine.auxIntArg(value);
+                    machine.auxCstArg(CstInteger.make(value));
+                    break;
+                }
+                default: {
+                    visitInvalid(opcode, offset, length);
+                    return;
+                }
+            }
+
+            machine.run(frame, offset, opcode);
         }
-    }
 
-    private void checkInterfaceMethodDeclaration(ConcreteMethod declaredMethod) {
-        if (!this.dexOptions.apiIsSupported(24)) {
-            String str = "defining a %s interface method requires --min-sdk-version >= %d (currently %d) for interface methods: %s.%s";
-            Object[] objArr = new Object[5];
-            objArr[0] = declaredMethod.isStaticMethod() ? "static" : "default";
-            objArr[1] = Integer.valueOf(24);
-            objArr[2] = Integer.valueOf(this.dexOptions.minSdkVersion);
-            objArr[3] = declaredMethod.getDefiningClass().toHuman();
-            objArr[4] = declaredMethod.getNat().toHuman();
-            warn(String.format(str, objArr));
+        /** {@inheritDoc} */
+        public void visitConstant(int opcode, int offset, int length,
+                                  Constant cst, int value) {
+            switch (opcode) {
+                case ByteOps.ANEWARRAY: {
+                    machine.popArgs(frame, Type.INT);
+                    break;
+                }
+                case ByteOps.PUTSTATIC: {
+                    Type fieldType = ((CstFieldRef) cst).getType();
+                    machine.popArgs(frame, fieldType);
+                    break;
+                }
+                case ByteOps.GETFIELD:
+                case ByteOps.CHECKCAST:
+                case ByteOps.INSTANCEOF: {
+                    machine.popArgs(frame, Type.OBJECT);
+                    break;
+                }
+                case ByteOps.PUTFIELD: {
+                    Type fieldType = ((CstFieldRef) cst).getType();
+                    machine.popArgs(frame, Type.OBJECT, fieldType);
+                    break;
+                }
+                case ByteOps.INVOKEINTERFACE: {
+                    /*
+                     * Convert the interface method ref into a normal
+                     * method ref.
+                     */
+                    cst = ((CstInterfaceMethodRef) cst).toMethodRef();
+                    // and fall through...
+                }
+                case ByteOps.INVOKEVIRTUAL:
+                case ByteOps.INVOKESPECIAL: {
+                    /*
+                     * Get the instance prototype, and use it to direct
+                     * the machine.
+                     */
+                    Prototype prototype =
+                        ((CstMethodRef) cst).getPrototype(false);
+                    machine.popArgs(frame, prototype);
+                    break;
+                }
+                case ByteOps.INVOKESTATIC: {
+                    /*
+                     * Get the static prototype, and use it to direct
+                     * the machine.
+                     */
+                    Prototype prototype =
+                        ((CstMethodRef) cst).getPrototype(true);
+                    machine.popArgs(frame, prototype);
+                    break;
+                }
+                case ByteOps.MULTIANEWARRAY: {
+                    /*
+                     * The "value" here is the count of dimensions to
+                     * create. Make a prototype of that many "int"
+                     * types, and tell the machine to pop them. This
+                     * isn't the most efficient way in the world to do
+                     * this, but then again, multianewarray is pretty
+                     * darn rare and so not worth much effort
+                     * optimizing for.
+                     */
+                    Prototype prototype =
+                        Prototype.internInts(Type.VOID, value);
+                    machine.popArgs(frame, prototype);
+                    break;
+                }
+                default: {
+                    machine.clearArgs();
+                    break;
+                }
+            }
+
+            machine.auxIntArg(value);
+            machine.auxCstArg(cst);
+            machine.run(frame, offset, opcode);
         }
-    }
 
-    private void checkInvokeSignaturePolymorphic(int opcode) {
-        if (!this.dexOptions.apiIsSupported(26)) {
-            fail(String.format("invoking a signature-polymorphic requires --min-sdk-version >= %d (currently %d)", new Object[]{Integer.valueOf(26), Integer.valueOf(this.dexOptions.minSdkVersion)}));
-        } else if (opcode != 182) {
-            fail("Unsupported signature polymorphic invocation (" + ByteOps.opName(opcode) + ")");
+        /** {@inheritDoc} */
+        public void visitBranch(int opcode, int offset, int length,
+                int target) {
+            switch (opcode) {
+                case ByteOps.IFEQ:
+                case ByteOps.IFNE:
+                case ByteOps.IFLT:
+                case ByteOps.IFGE:
+                case ByteOps.IFGT:
+                case ByteOps.IFLE: {
+                    machine.popArgs(frame, Type.INT);
+                    break;
+                }
+                case ByteOps.IFNULL:
+                case ByteOps.IFNONNULL: {
+                    machine.popArgs(frame, Type.OBJECT);
+                    break;
+                }
+                case ByteOps.IF_ICMPEQ:
+                case ByteOps.IF_ICMPNE:
+                case ByteOps.IF_ICMPLT:
+                case ByteOps.IF_ICMPGE:
+                case ByteOps.IF_ICMPGT:
+                case ByteOps.IF_ICMPLE: {
+                    machine.popArgs(frame, Type.INT, Type.INT);
+                    break;
+                }
+                case ByteOps.IF_ACMPEQ:
+                case ByteOps.IF_ACMPNE: {
+                    machine.popArgs(frame, Type.OBJECT, Type.OBJECT);
+                    break;
+                }
+                case ByteOps.GOTO:
+                case ByteOps.JSR:
+                case ByteOps.GOTO_W:
+                case ByteOps.JSR_W: {
+                    machine.clearArgs();
+                    break;
+                }
+                default: {
+                    visitInvalid(opcode, offset, length);
+                    return;
+                }
+            }
+
+            machine.auxTargetArg(target);
+            machine.run(frame, offset, opcode);
         }
-    }
 
-    private void fail(String reason) {
-        throw new SimException(String.format("ERROR in %s.%s: %s", new Object[]{this.method.getDefiningClass().toHuman(), this.method.getNat().toHuman(), reason}));
-    }
+        /** {@inheritDoc} */
+        public void visitSwitch(int opcode, int offset, int length,
+                SwitchList cases, int padding) {
+            machine.popArgs(frame, Type.INT);
+            machine.auxIntArg(padding);
+            machine.auxSwitchArg(cases);
+            machine.run(frame, offset, opcode);
+        }
 
-    private void warn(String reason) {
-        this.dexOptions.err.println(String.format("WARNING in %s.%s: %s", new Object[]{this.method.getDefiningClass().toHuman(), this.method.getNat().toHuman(), reason}));
+        /** {@inheritDoc} */
+        public void visitNewarray(int offset, int length, CstType type,
+                ArrayList<Constant> initValues) {
+            machine.popArgs(frame, Type.INT);
+            machine.auxInitValues(initValues);
+            machine.auxCstArg(type);
+            machine.run(frame, offset, ByteOps.NEWARRAY);
+        }
+
+        /** {@inheritDoc} */
+        public void setPreviousOffset(int offset) {
+            previousOffset = offset;
+        }
+
+        /** {@inheritDoc} */
+        public int getPreviousOffset() {
+            return previousOffset;
+        }
     }
 }

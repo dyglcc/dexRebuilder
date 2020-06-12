@@ -1,10 +1,27 @@
+/*
+ * Copyright (C) 2011 The Android Open Source Project
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
 package com.android.dex;
 
-import com.android.dex.Dex.Section;
 import com.android.dex.util.ByteArrayByteInput;
 import com.android.dex.util.ByteInput;
-import com.android.dx.io.Opcodes;
 
+/**
+ * An encoded value or array.
+ */
 public final class EncodedValue implements Comparable<EncodedValue> {
     private final byte[] data;
 
@@ -13,28 +30,28 @@ public final class EncodedValue implements Comparable<EncodedValue> {
     }
 
     public ByteInput asByteInput() {
-        return new ByteArrayByteInput(this.data);
+        return new ByteArrayByteInput(data);
     }
 
     public byte[] getBytes() {
-        return this.data;
+        return data;
     }
 
-    public void writeTo(Section out) {
-        out.write(this.data);
+    public void writeTo(Dex.Section out) {
+        out.write(data);
     }
 
-    public int compareTo(EncodedValue other) {
-        int size = Math.min(this.data.length, other.data.length);
+    @Override public int compareTo(EncodedValue other) {
+        int size = Math.min(data.length, other.data.length);
         for (int i = 0; i < size; i++) {
-            if (this.data[i] != other.data[i]) {
-                return (this.data[i] & Opcodes.CONST_METHOD_TYPE) - (other.data[i] & Opcodes.CONST_METHOD_TYPE);
+            if (data[i] != other.data[i]) {
+                return (data[i] & 0xff) - (other.data[i] & 0xff);
             }
         }
-        return this.data.length - other.data.length;
+        return data.length - other.data.length;
     }
 
-    public String toString() {
-        return Integer.toHexString(this.data[0] & Opcodes.CONST_METHOD_TYPE) + "...(" + this.data.length + ")";
+    @Override public String toString() {
+        return Integer.toHexString(data[0] & 0xff) + "...(" + data.length + ")";
     }
 }

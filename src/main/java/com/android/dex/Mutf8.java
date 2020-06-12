@@ -1,98 +1,115 @@
+/*
+ * Copyright (C) 2011 The Android Open Source Project
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
 package com.android.dex;
 
 import com.android.dex.util.ByteInput;
-import com.android.dx.io.Opcodes;
+
 import java.io.UTFDataFormatException;
 
+/**
+ * Modified UTF-8 as described in the dex file format spec.
+ *
+ * <p>Derived from libcore's MUTF-8 encoder at java.nio.charset.ModifiedUtf8.
+ */
 public final class Mutf8 {
-    private Mutf8() {
-    }
+    private Mutf8() {}
 
+    /**
+     * Decodes bytes from {@code in} into {@code out} until a delimiter 0x00 is
+     * encountered. Returns a new string containing the decoded characters.
+     */
     public static String decode(ByteInput in, char[] out) throws UTFDataFormatException {
         int s = 0;
         while (true) {
-            char a = (char) (in.readByte() & Opcodes.CONST_METHOD_TYPE);
-            if (a == '\u0000') {
+            char a = (char) (in.readByte() & 0xff);
+            if (a == 0) {
                 return new String(out, 0, s);
             }
             out[s] = a;
-            if (a < '') {
+            if (a < '\u0080') {
                 s++;
-            } else if ((a & Opcodes.SHL_INT_LIT8) == 192) {
-                b = in.readByte() & Opcodes.CONST_METHOD_TYPE;
-                if ((b & 192) != 128) {
+            } else if ((a & 0xe0) == 0xc0) {
+                int b = in.readByte() & 0xff;
+                if ((b & 0xC0) != 0x80) {
                     throw new UTFDataFormatException("bad second byte");
                 }
-                s = s + 1;
-                out[s] = (char) (((a & 31) << 6) | (b & 63));
-                s = s;
-            } else if ((a & 240) == Opcodes.SHL_INT_LIT8) {
-                b = in.readByte() & Opcodes.CONST_METHOD_TYPE;
-                int c = in.readByte() & Opcodes.CONST_METHOD_TYPE;
-                if ((b & 192) == 128 && (c & 192) == 128) {
-                    s = s + 1;
-                    out[s] = (char) ((((a & 15) << 12) | ((b & 63) << 6)) | (c & 63));
-                    s = s;
+                out[s++] = (char) (((a & 0x1F) << 6) | (b & 0x3F));
+            } else if ((a & 0xf0) == 0xe0) {
+                int b = in.readByte() & 0xff;
+                int c = in.readByte() & 0xff;
+                if (((b & 0xC0) != 0x80) || ((c & 0xC0) != 0x80)) {
+                    throw new UTFDataFormatException("bad second or third byte");
                 }
+                out[s++] = (char) (((a & 0x0F) << 12) | ((b & 0x3F) << 6) | (c & 0x3F));
             } else {
                 throw new UTFDataFormatException("bad byte");
             }
         }
-        throw new UTFDataFormatException("bad second or third byte");
     }
 
+    /**
+     * Returns the number of bytes the modified UTF8 representation of 's' would take.
+     */
     private static long countBytes(String s, boolean shortLength) throws UTFDataFormatException {
         long result = 0;
-        int length = s.length();
-        int i = 0;
-        while (i < length) {
+        final int length = s.length();
+        for (int i = 0; i < length; ++i) {
             char ch = s.charAt(i);
-            if (ch != '\u0000' && ch <= '') {
-                result++;
-            } else if (ch <= '߿') {
+            if (ch != 0 && ch <= 127) { // U+0000 uses two bytes.
+                ++result;
+            } else if (ch <= 2047) {
                 result += 2;
             } else {
                 result += 3;
             }
-            if (!shortLength || result <= 65535) {
-                i++;
-            } else {
+            if (shortLength && result > 65535) {
                 throw new UTFDataFormatException("String more than 65535 UTF bytes long");
             }
         }
         return result;
     }
 
+    /**
+     * Encodes the modified UTF-8 bytes corresponding to {@code s} into  {@code
+     * dst}, starting at {@code offset}.
+     */
     public static void encode(byte[] dst, int offset, String s) {
-        int length = s.length();
-        int i = 0;
-        int offset2 = offset;
-        while (i < length) {
+        final int length = s.length();
+        for (int i = 0; i < length; i++) {
             char ch = s.charAt(i);
-            if (ch != '\u0000' && ch <= '') {
-                offset = offset2 + 1;
-                dst[offset2] = (byte) ch;
-            } else if (ch <= '߿') {
-                offset = offset2 + 1;
-                dst[offset2] = (byte) (((ch >> 6) & 31) | 192);
-                offset2 = offset + 1;
-                dst[offset] = (byte) ((ch & 63) | 128);
-                offset = offset2;
+            if (ch != 0 && ch <= 127) { // U+0000 uses two bytes.
+                dst[offset++] = (byte) ch;
+            } else if (ch <= 2047) {
+                dst[offset++] = (byte) (0xc0 | (0x1f & (ch >> 6)));
+                dst[offset++] = (byte) (0x80 | (0x3f & ch));
             } else {
-                offset = offset2 + 1;
-                dst[offset2] = (byte) (((ch >> 12) & 15) | Opcodes.SHL_INT_LIT8);
-                offset2 = offset + 1;
-                dst[offset] = (byte) (((ch >> 6) & 63) | 128);
-                offset = offset2 + 1;
-                dst[offset2] = (byte) ((ch & 63) | 128);
+                dst[offset++] = (byte) (0xe0 | (0x0f & (ch >> 12)));
+                dst[offset++] = (byte) (0x80 | (0x3f & (ch >> 6)));
+                dst[offset++] = (byte) (0x80 | (0x3f & ch));
             }
-            i++;
-            offset2 = offset;
         }
     }
 
+    /**
+     * Returns an array containing the <i>modified UTF-8</i> form of {@code s}.
+     */
     public static byte[] encode(String s) throws UTFDataFormatException {
-        byte[] result = new byte[((int) countBytes(s, true))];
+        int utfCount = (int) countBytes(s, true);
+        byte[] result = new byte[utfCount];
         encode(result, 0, s);
         return result;
     }
